@@ -6,7 +6,7 @@ import numpy as np
 from gymnasium import spaces
 
 from .traffic_signal import TrafficSignal
-
+from .attack_controller import global_orchestrator
 
 class ObservationFunction:
     """Abstract base class for observation functions."""
@@ -76,6 +76,12 @@ class VANETObservationFunction(ObservationFunction):
         comm_flag = [1.0 if getattr(self.ts, 'comm_ok', True) else 0.0]
 
         observation = np.array(phase_id + min_green + density + queue + norm_latency + comm_flag, dtype=np.float32)
+        
+        # --- INTERCEPTION CYBER-PHYSIQUE ---
+        # L'orchestrateur vérifie s'il y a une attaque en cours sur cette intersection
+        # et empoisonne les données (Ghost Vehicles, Latence, etc.) avant de les rendre.
+        observation = global_orchestrator.corrupt_observation(self.ts, observation)
+        
         return observation
 
     def observation_space(self) -> spaces.Box:

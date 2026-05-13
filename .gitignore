@@ -113,3 +113,8 @@ settings.json
 *.csv
 /logs
 /wandb
+/outputs/
+/memoire_latex/
+*.zip
+*.pth
+generate_report_plots.py
