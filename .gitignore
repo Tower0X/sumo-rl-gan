@@ -110,7 +110,6 @@ venv.bak/
 settings.json
 
 # output files
-*.csv
 /logs
 /wandb
 /memoire_latex/
