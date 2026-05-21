@@ -16,18 +16,43 @@ if "%SUMO_HOME%"=="" (
     exit /b 1
 )
 
-:: Activation de l'environnement virtuel
-if exist ".venv\Scripts\activate.bat" (
-    echo [*] Activation de l'environnement virtuel (.venv)...
-    call .venv\Scripts\activate.bat
-) else (
-    echo [WARNING] Environnement virtuel .venv non detecte. Tentative avec le python systeme...
+:: Detection automatique de l'environnement contenant les dependances (gymnasium, streamlit, stable-baselines3)
+set RUN_CMD=
+
+:: Test 1: Environnement virtuel (.venv)
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import gymnasium, streamlit, stable_baselines3" >nul 2>&1
+    if errorlevel 0 (
+        echo [*] Environnement virtuel valide detecte (.venv).
+        set RUN_CMD=".venv\Scripts\python.exe" -m streamlit run app_dashboard.py
+    )
+)
+
+:: Test 2: Python global
+if "%RUN_CMD%"=="" (
+    python -c "import gymnasium, streamlit, stable_baselines3" >nul 2>&1
+    if %errorlevel% equ 0 (
+        echo [*] Dependances trouvees dans l'environnement Python global.
+        set RUN_CMD=python -m streamlit run app_dashboard.py
+    )
+)
+
+:: Si aucun environnement n'est valide
+if "%RUN_CMD%"=="" (
+    echo [ERROR] Les dependances requises (gymnasium, stable-baselines3, streamlit) ne sont pas installees.
+    echo.
+    echo Veuillez les installer en executant la commande suivante dans votre terminal :
+    echo     pip install gymnasium stable-baselines3 streamlit sumo-rl
+    echo.
+    pause
+    exit /b 1
 )
 
 echo.
-echo [*] Lancement du Dashboard de Supervision Streamlit...
+echo [*] Lancement du Dashboard de Supervision...
 echo [INFO] Le navigateur web va s'ouvrir automatiquement sur http://localhost:8501
 echo.
-streamlit run app_dashboard.py
+%RUN_CMD%
+
 
 pause
