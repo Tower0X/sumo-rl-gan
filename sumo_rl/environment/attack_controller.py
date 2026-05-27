@@ -6,9 +6,13 @@ from enum import Enum
 
 class AttackType(Enum):
     NONE = 0
-    TEMPORAL_DOS = 1     # Latence forcée et brouillage (Jitter)
-    DATA_POISONING = 2   # Modification des valeurs de capteurs (Déni de réalité)
-    GHOST_VEHICLES = 3   # Injection de véhicules fantômes (Attaque Sybil)
+    TEMPORAL_DOS = 1        # Latence de base
+    DATA_POISONING = 2      # Modification des capteurs
+    GHOST_VEHICLES = 3      # Sybil classique (Densité)
+    JAMMER = 4              # Coupure totale (Brouilleur)
+    FLOODING_DDOS = 5       # Saturation de requêtes (Jitter intense)
+    SLOWLORIS_DDOS = 6      # Connexions maintenues (Lag persistant)
+    POSITION_JITTER = 7     # Bruit sur les positions (Sybil cinématique)
 
 class TargetType(Enum):
     INTERSECTION = "Intersection"
@@ -60,20 +64,20 @@ class CyberPhysicalAttackOrchestrator:
     # ==========================================
     def bridge_cGAN_tensor(self, target_id, gan_output_tensor):
         """
-        Traduit la sortie brute du réseau PyTorch (GAN) en commandes physiques.
-        gan_output_tensor est composé de [P_None, P_DoS, P_Poison, P_Sybil, Intensity]
+        Traduit la sortie brute du réseau PyTorch (GAN LSTM) en commandes physiques.
+        gan_output_tensor est composé de [P_None, ..., P_Attack7, Intensity] (9 éléments)
         """
-        # On sépare les probabilités du type d'attaque (4 premiers éléments)
-        attack_probs = gan_output_tensor[:4]
-        intensity = gan_output_tensor[4] # Le dernier élément est l'intensité
+        # On sépare les probabilités du type d'attaque (8 premiers éléments)
+        attack_probs = gan_output_tensor[:8]
+        intensity = gan_output_tensor[8] # Le dernier élément est l'intensité
         
         # On prend l'index de l'attaque la plus probable
         attack_idx = int(np.argmax(attack_probs)) 
         attack_type = AttackType(attack_idx)
         
-        # Le GAN décide d'attaquer si la confiance est suffisante et que ce n'est pas "NONE"
-        if attack_type != AttackType.NONE and intensity > 0.1:
-            self.trigger_manual_attack(target_id, attack_type, intensity, duration_steps=5)
+        # Le GAN décide d'attaquer si la confiance est suffisante
+        if attack_type != AttackType.NONE and intensity > 0.05:
+            self.trigger_manual_attack(target_id, attack_type, intensity, duration_steps=3)
 
     # ==========================================
     # L'ARSENAL : INJECTION DANS L'OBSERVATION
@@ -105,15 +109,19 @@ class CyberPhysicalAttackOrchestrator:
         # -----------------------------------------------------
         # 1. TEMPORAL DoS (Latence & Brouillage)
         # -----------------------------------------------------
+        # 1. TEMPORAL DoS (Latence de base) / FLOODING / SLOWLORIS
         if attack["type"] == AttackType.TEMPORAL_DOS:
-            # On remplace l'index de la latence (supposons que c'est l'avant dernier)
-            # par un bruit massif (jusqu'à 10 secondes de lag)
-            noise = np.random.normal(0, intensity * 5.0) 
+            noise = np.random.normal(0, intensity * 2.0) 
             corrupted_obs[-2] += noise
-            # Si l'intensité est > 80%, on coupe le comm_flag (dernier index) et on prévient le système
-            if intensity > 0.8:
-                corrupted_obs[-1] = 0.0 
-                ts.comm_ok = False
+            if intensity > 0.9: ts.comm_ok = False
+
+        elif attack["type"] == AttackType.FLOODING_DDOS:
+            noise = np.random.uniform(0, intensity * 10.0)
+            corrupted_obs[-2] += noise
+            if np.random.random() < intensity: ts.comm_ok = False
+
+        elif attack["type"] == AttackType.SLOWLORIS_DDOS:
+            corrupted_obs[-2] += intensity * 8.0
 
         # -----------------------------------------------------
         # 2. DATA POISONING (Déni de réalité - Fausse fluidité)
@@ -128,13 +136,21 @@ class CyberPhysicalAttackOrchestrator:
         # -----------------------------------------------------
         # 3. GHOST VEHICLES (Attaque Sybil)
         # -----------------------------------------------------
+        # 3. GHOST VEHICLES (Sybil de densité) / POSITION JITTER
         elif attack["type"] == AttackType.GHOST_VEHICLES:
-            # Le but est de créer des embouteillages fantômes pour déclencher
-            # des feux verts inutiles et bloquer le vrai trafic.
-            # On sature la densité (1ère moitié du vecteur)
             mid = len(corrupted_obs) // 2
-            # Ajout d'une fausse densité proportionnelle à l'intensité
             corrupted_obs[1:mid] = np.clip(corrupted_obs[1:mid] + intensity, 0.0, 1.0)
+
+        elif attack["type"] == AttackType.POSITION_JITTER:
+            mid = len(corrupted_obs) // 2
+            jitter = np.random.normal(0, intensity, mid-1)
+            corrupted_obs[1:mid] = np.clip(corrupted_obs[1:mid] + jitter, 0.0, 1.0)
+
+        # 4. JAMMER (Brouilleur total)
+        elif attack["type"] == AttackType.JAMMER:
+            ts.comm_ok = False
+            corrupted_obs[-1] = 0.0
+            corrupted_obs[-2] = 99.0
 
         return corrupted_obs
 

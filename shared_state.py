@@ -11,6 +11,8 @@ class SharedState:
         self.mode = "defense_only"  # "defense_only", "manual_attack", "adversarial_gan"
         self.manual_attack_type = AttackType.NONE
         self.manual_virulence = 0.5
+        self.target_node_id = ""
+        self.available_nodes = []
         self.use_gui = False
         
         # Métriques et Historiques pour le Dashboard

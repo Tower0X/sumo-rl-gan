@@ -23,6 +23,16 @@ st.markdown("""
         background-color: #0d1117;
         color: #c9d1d9;
     }
+    .badge-advanced {
+        background: linear-gradient(90deg, #58a6ff, #bc8cff);
+        color: white;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: bold;
+        display: inline-block;
+        margin-bottom: 10px;
+    }
     
     /* Title and Headers Styling */
     h1, h2, h3 {
@@ -118,22 +128,44 @@ elif mode_choice == "Attaque Manuelle (Stress Test)":
 else:
     state.mode = "adversarial_gan"
 
+# Attribution des cibles (Intersections)
+if state.available_nodes:
+    state.target_node_id = st.sidebar.selectbox(
+        "🎯 Intersection Cible :",
+        state.available_nodes,
+        index=state.available_nodes.index(state.target_node_id) if state.target_node_id in state.available_nodes else 0,
+        disabled=not state.running
+    )
+
 # Configuration d'Attaque Manuelle (Stress Test)
 if state.mode == "manual_attack":
     st.sidebar.subheader("⚔️ Injection d'Attaque")
     atk_type_str = st.sidebar.selectbox(
         "Type de perturbation :",
-        ("Aucune", "Temporal DoS (Latence)", "Data Poisoning (Capteurs)", "Ghost Vehicles (Sybil)")
+        (
+            "Aucune", 
+            "Brouilleur (Coupure Totale)",
+            "DoS - Flooding (Saturation)", 
+            "DoS - Slowloris (Lag Persistant)",
+            "Sybil - Ghost Vehicles (Densité)",
+            "Sybil - Position Jitter (Cinématique)",
+            "Temporal DoS (Latence Variable)",
+            "Data Poisoning (Capteurs)"
+        )
     )
     
-    if atk_type_str == "Aucune":
-        state.manual_attack_type = AttackType.NONE
-    elif atk_type_str == "Temporal DoS (Latence)":
-        state.manual_attack_type = AttackType.TEMPORAL_DOS
-    elif atk_type_str == "Data Poisoning (Capteurs)":
-        state.manual_attack_type = AttackType.DATA_POISONING
-    else:
-        state.manual_attack_type = AttackType.GHOST_VEHICLES
+    # Mapping des noms UI vers l'Enum AttackType
+    mapping = {
+        "Aucune": AttackType.NONE,
+        "Brouilleur (Coupure Totale)": AttackType.JAMMER,
+        "DoS - Flooding (Saturation)": AttackType.FLOODING_DDOS,
+        "DoS - Slowloris (Lag Persistant)": AttackType.SLOWLORIS_DDOS,
+        "Sybil - Ghost Vehicles (Densité)": AttackType.GHOST_VEHICLES,
+        "Sybil - Position Jitter (Cinématique)": AttackType.POSITION_JITTER,
+        "Temporal DoS (Latence Variable)": AttackType.TEMPORAL_DOS,
+        "Data Poisoning (Capteurs)": AttackType.DATA_POISONING
+    }
+    state.manual_attack_type = mapping.get(atk_type_str, AttackType.NONE)
         
     virulence = st.sidebar.slider(
         "Virulence de l'Attaque :",
@@ -147,8 +179,8 @@ st.sidebar.markdown("**INF4258 - GROUPE 10**")
 st.sidebar.caption("Université de Yaoundé I")
 
 # 3. Main Frame - Dashboard
-st.markdown("# 📶 Supervision de Résilience VANET")
-st.markdown("Auditez la robustesse du contrôleur de trafic IA face aux attaques injectées en temps réel.")
+st.markdown('# 📶 Supervision de Résilience VANET <div class="badge-advanced">Advanced Temporal Intelligence (LSTM)</div>', unsafe_allow_html=True)
+st.markdown("Auditez la robustesse du contrôleur de trafic IA (Multi-Agent) face aux attaques injectées en temps réel sur une grille urbaine 4x4.")
 
 # Affichage des cartes de télémétrie en temps réel
 col1, col2, col3, col4 = st.columns(4)

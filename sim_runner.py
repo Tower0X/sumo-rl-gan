@@ -5,21 +5,21 @@ import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
 from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
 from sumo_rl.environment.gan_attacker import Generator
-from stable_baselines3 import PPO
+from sb3_contrib import RecurrentPPO
 from shared_state import state
 
 def run_simulation():
     state.reset()
     state.running = True
-    state.add_log("🏁 Démarrage du moteur physique SUMO...", "info")
+    state.add_log("🏁 Démarrage du bouclier urbain (Moteur SUMO)...", "info")
     
-    # 1. Initialisation de l'environnement
+    # 1. Initialisation de l'environnement Grille 4x4
     try:
         env = sumo_rl.SumoEnvironment(
-            net_file='sumo_rl/nets/2way-single-intersection/single-intersection.net.xml',
-            route_file='sumo_rl/nets/2way-single-intersection/single-intersection-vhvh.rou.xml',
+            net_file='sumo_rl/nets/4x4-Lucas/4x4.net.xml',
+            route_file='sumo_rl/nets/4x4-Lucas/4x4c1c2c1c2.rou.xml',
             use_gui=state.use_gui,
-            num_seconds=10000, 
+            num_seconds=20000, 
             delta_time=5,
             single_agent=True,
             observation_class=VANETObservationFunction,
@@ -30,122 +30,111 @@ def run_simulation():
         state.running = False
         return
 
-    ts_id = env.ts_ids[0]
-    
-    # 2. Chargement du Défenseur PPO
-    state.add_log("[*] Chargement de l'Agent de Défense (PPO)...", "info")
-    try:
-        defender = PPO.load("outputs/ppo_vanet_model")
-    except Exception as e:
-        state.add_log(f"❌ Impossible de charger PPO: {str(e)}", "error")
-        env.close()
-        state.running = False
-        return
+    ts_ids = env.ts_ids
+    with state.lock:
+        state.available_nodes = ts_ids
+        if not state.target_node_id and ts_ids:
+            state.target_node_id = ts_ids[0]
 
-    # 3. Chargement de l'Attaquant cGAN
-    state.add_log("[*] Chargement du Neural Hacker (cGAN)...", "info")
+    # 2. Chargement du Défenseur RecurrentPPO
+    state.add_log("[*] Chargement de la Matrice Neurale Recurrente (LSTM)...", "info")
+    try:
+        defender = RecurrentPPO.load("outputs/recurrent_urban_shield_4x4")
+        # RecurrentPPO a besoin de son état caché initial
+        lstm_states = None
+        episode_starts = np.ones((1,), dtype=bool)
+    except Exception as e:
+        state.add_log(f"⚠️ Modèle récurrent non trouvé, basculement mode standard.", "warning")
+        from stable_baselines3 import PPO
+        try:
+            defender = PPO.load("outputs/ppo_marl_4x4_model")
+            lstm_states = None
+        except:
+            state.add_log("❌ Aucun modèle de défense trouvé.", "error")
+            env.close()
+            state.running = False
+            return
+
+    # 3. Chargement de l'Attaquant LSTM-GAN
+    state.add_log("[*] Chargement du Neural Hacker (LSTM GAN)...", "info")
     state_dim = env.observation_space.shape[0]
     gan_hacker = Generator(state_dim)
     gan_loaded = False
+    gan_hidden = None
     try:
-        gan_hacker.load_state_dict(torch.load("outputs/gan/generator_model.pth"))
+        gan_hacker.load_state_dict(torch.load("outputs/gan/generator_model_lstm.pth"))
         gan_hacker.eval()
         gan_loaded = True
-    except Exception as e:
-        state.add_log(f"⚠️ Impossible de charger GAN (mode Duel désactivé): {str(e)}", "warning")
+    except:
+        state.add_log("⚠️ LSTM-GAN non trouvé. Mode Duel réduit.", "warning")
 
     obs, info = env.reset()
     done = False
     
-    state.add_log("🚀 Co-Simulation activée en arrière-plan.", "info")
+    state.add_log("🚀 Supervision Urbaine (16 agents) active.", "info")
 
     while not done and not state.should_stop:
-        # Lire la configuration partagée (avec lock)
         with state.lock:
             current_mode = state.mode
             manual_atk = state.manual_attack_type
             manual_virulence = state.manual_virulence
+            target_ts = state.target_node_id
 
-        # Appliquer les attaques selon le mode
+        # --- GESTION DES ATTAQUES ---
+        active_name = "Aucune"
+        active_intensity = 0.0
+
         if current_mode == "defense_only":
             global_orchestrator.active_attacks.clear()
-            env.traffic_signals[ts_id].comm_ok = True
-            active_name = "Aucune"
-            active_intensity = 0.0
+            for tid in ts_ids: env.traffic_signals[tid].comm_ok = True
             
         elif current_mode == "manual_attack":
-            if manual_atk != AttackType.NONE:
-                global_orchestrator.trigger_manual_attack(
-                    ts_id, 
-                    manual_atk, 
-                    manual_virulence, 
-                    duration_steps=1
-                )
-                active_name = manual_atk.name
+            if manual_atk != AttackType.NONE and target_ts:
+                global_orchestrator.trigger_manual_attack(target_ts, manual_atk, manual_virulence, duration_steps=1)
+                active_name = f"{manual_atk.name} sur {target_ts}"
                 active_intensity = manual_virulence
-            else:
-                global_orchestrator.active_attacks.clear()
-                env.traffic_signals[ts_id].comm_ok = True
-                active_name = "Aucune"
-                active_intensity = 0.0
                 
         elif current_mode == "adversarial_gan":
             if gan_loaded:
                 with torch.no_grad():
-                    state_tensor = torch.FloatTensor(obs).unsqueeze(0)
-                    attack_vector = gan_hacker(state_tensor).numpy()[0]
+                    state_tensor = torch.FloatTensor(obs).unsqueeze(0).unsqueeze(0)
+                    attack_vector_tensor, gan_hidden = gan_hacker(state_tensor, gan_hidden)
+                    attack_vector = attack_vector_tensor.numpy()[0]
                 
-                global_orchestrator.bridge_cGAN_tensor(ts_id, attack_vector)
-                
-                # Récupérer l'attaque injectée
-                if ts_id in global_orchestrator.active_attacks:
-                    atk = global_orchestrator.active_attacks[ts_id]
-                    active_name = atk["type"].name
+                # Le GAN choisit une cible ou on garde la cible dashboard
+                global_orchestrator.bridge_cGAN_tensor(target_ts, attack_vector)
+                if target_ts in global_orchestrator.active_attacks:
+                    atk = global_orchestrator.active_attacks[target_ts]
+                    active_name = f"GAN: {atk['type'].name}"
                     active_intensity = atk["intensity"]
-                else:
-                    active_name = "Aucune"
-                    active_intensity = 0.0
-            else:
-                active_name = "Indisponible (Erreur GAN)"
-                active_intensity = 0.0
 
-        # Décision de défense (PPO) sur l'observation potentiellement corrompue
-        action, _ = defender.predict(obs, deterministic=True)
+        # --- DÉCISION PPO (AVEC MÉMOIRE) ---
+        if lstm_states is not None:
+            action, lstm_states = defender.predict(obs, state=lstm_states, episode_start=episode_starts, deterministic=True)
+            episode_starts = np.zeros((1,), dtype=bool)
+        else:
+            action, _ = defender.predict(obs, deterministic=True)
+
         next_obs, reward, terminated, truncated, step_info = env.step(action)
         
-        # Enregistrer les métriques (avec lock)
+        # --- MISE À JOUR ÉTAT ---
         with state.lock:
             state.step += 1
             state.active_attack_name = active_name
             state.active_attack_intensity = active_intensity
             state.current_reward = reward
-            
             state.reward_history.append(reward)
             state.waiting_time_history.append(step_info.get('system_total_waiting_time', 0))
-            
-            # Latence standard + gigue (normalement l'avant-dernier élément du vecteur d'obs)
             latency = float(np.abs(next_obs[-2]) * 10)
             state.latency_history.append(latency)
-            
-            # Queues accumulées sur toutes les voies (2ème moitié du vecteur hors latence/comm)
             mid = len(next_obs) // 2
             total_queues = int(np.sum(next_obs[mid:-2]) * 10)
             state.queue_history.append(total_queues)
 
-        # Journalisation des événements notables
-        if state.step % 10 == 0:
-            if active_name != "Aucune":
-                state.add_log(f"⚠️ Attaque active: {active_name} | Virulence: {active_intensity*100:.1f}% | Récompense: {reward:.2f}", "warning")
-            else:
-                state.add_log(f"🟢 Trafic sain | Temps d'attente: {step_info.get('system_total_waiting_time', 0):.1f}s | Récompense: {reward:.2f}", "info")
-
         obs = next_obs
         done = terminated or truncated
-        
-        # Ralentir la simulation pour permettre le rendu fluide du dashboard
-        time.sleep(0.15 if state.use_gui else 0.08)
+        time.sleep(0.05)
 
     env.close()
-    with state.lock:
-        state.running = False
-    state.add_log("🏁 Simulation arrêtée. Connexion SUMO fermée.", "info")
+    with state.lock: state.running = False
+    state.add_log("🏁 Simulation arrêtée.", "info")

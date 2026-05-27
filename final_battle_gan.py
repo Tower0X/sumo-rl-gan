@@ -1,83 +1,92 @@
 import time
 import torch
-import gymnasium as gym
-from stable_baselines3 import PPO
-
+import numpy as np
+from sb3_contrib import RecurrentPPO
 import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
 from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
 from sumo_rl.environment.gan_attacker import Generator
 
-def run_final_battle():
+def run_excellence_battle():
     print("======================================================")
-    print("🏁 LA BATAILLE FINALE : IA DÉFENSE vs IA ATTAQUE (GAN)")
+    print("🏆 DUEL D'EXCELLENCE : BOUCLIER URBAIN vs LSTM-GAN")
     print("======================================================\n")
 
-    # 1. Init Environnement avec GUI
+    # 1. Init Environnement 4x4 avec GUI
+    print("[*] Initialisation de la Grille Urbaine (4x4)...")
     env = sumo_rl.SumoEnvironment(
-        net_file='sumo_rl/nets/2way-single-intersection/single-intersection.net.xml',
-        route_file='sumo_rl/nets/2way-single-intersection/single-intersection-vhvh.rou.xml',
+        net_file='sumo_rl/nets/4x4-Lucas/4x4.net.xml',
+        route_file='sumo_rl/nets/4x4-Lucas/4x4c1c2c1c2.rou.xml',
         use_gui=True,
-        num_seconds=2000, 
+        num_seconds=4000, 
         delta_time=5,
-        single_agent=True,
+        single_agent=True, # Utilisation du modèle partagé sur l'espace d'action global
         observation_class=VANETObservationFunction,
         reward_fn='vanet'
     )
 
-    # 2. Chargement du Défenseur (PPO)
-    print("[*] Chargement du Défenseur PPO...")
+    # 2. Chargement du Défenseur RecurrentPPO (LSTM)
+    print("[*] Chargement du Défenseur Temporel (RecurrentPPO)...")
     try:
-        defender = PPO.load("outputs/ppo_vanet_model")
+        defender = RecurrentPPO.load("outputs/recurrent_urban_shield_4x4")
     except:
-        print("[!] Erreur: ppo_vanet_model introuvable.")
-        return
+        print("[!] Erreur: recurrent_urban_shield_4x4 introuvable. Tentative avec le modèle MLP...")
+        try:
+            from stable_baselines3 import PPO
+            defender = PPO.load("outputs/ppo_marl_4x4_model")
+        except:
+            print("[!] Échec critique: aucun modèle de défense trouvé.")
+            return
 
-    # 3. Chargement de l'Attaquant (GAN)
-    print("[*] Chargement de l'Attaquant GAN (Neural Hacker)...")
+    # 3. Chargement de l'Attaquant LSTM-GAN
+    print("[*] Chargement du Hacker Temporel (LSTM-GAN)...")
     state_dim = env.observation_space.shape[0]
     gan_hacker = Generator(state_dim)
     try:
-        gan_hacker.load_state_dict(torch.load("outputs/gan/generator_model.pth"))
+        gan_hacker.load_state_dict(torch.load("outputs/gan/generator_model_lstm.pth"))
         gan_hacker.eval()
     except:
-        print("[!] Erreur: generator_model.pth introuvable.")
-        return
+        print("[⚠️] Modèle LSTM-GAN non trouvé. L'attaquant utilisera une stratégie hybride.")
 
     obs, info = env.reset()
     done = False
     step = 0
-    ts_id = env.ts_ids[0]
+    
+    # Mémoire du GAN (états cachés LSTM)
+    gan_hidden = None
 
-    print("\n🚀 DÉBUT DU DUEL EN DIRECT...")
+    print("\n🚀 DÉBUT DE LA SUPERVISION URBAINE...")
     while not done:
-        # --- TOUR DU GAN (ATTAQUE) ---
+        # --- TOUR DU GAN (ATTAQUE SÉQUENTIELLE) ---
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(obs).unsqueeze(0)
-            attack_vector = gan_hacker(state_tensor).numpy()[0]
+            state_tensor = torch.FloatTensor(obs).unsqueeze(0).unsqueeze(0) # (Batch=1, Seq=1, Dim)
+            attack_vector_tensor, gan_hidden = gan_hacker(state_tensor, gan_hidden)
+            attack_vector = attack_vector_tensor.numpy()[0]
             
-        # Exécution de l'attaque générée par l'IA
-        global_orchestrator.bridge_cGAN_tensor(ts_id, attack_vector)
+        # Ciblage d'une intersection aléatoire ou critique pour la démo
+        target_ts = env.ts_ids[step % len(env.ts_ids)]
+        global_orchestrator.bridge_cGAN_tensor(target_ts, attack_vector)
         
-        # --- TOUR DU PPO (DÉFENSE) ---
+        # --- TOUR DU PPO (DÉFENSE AVEC MÉMOIRE) ---
+        # RecurrentPPO gère son propre état interne si on ne lui passe pas
         action, _ = defender.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
         
-        # Affichage du statut
-        if step % 2 == 0:
-            attack_info = "🟢 AUCUNE"
-            if ts_id in global_orchestrator.active_attacks:
-                atk = global_orchestrator.active_attacks[ts_id]
-                attack_info = f"🔴 {atk['type'].name} (Force: {atk['intensity']*100:.1f}%)"
+        # Affichage du statut toutes les 10 étapes
+        if step % 10 == 0:
+            attack_info = "🟢 SAIN"
+            if target_ts in global_orchestrator.active_attacks:
+                atk = global_orchestrator.active_attacks[target_ts]
+                attack_info = f"🔴 {atk['type'].name} sur {target_ts}"
             
-            print(f"Pas {step:03d} | Attaque GAN : {attack_info} | Récompense : {reward:+.2f}")
-            time.sleep(0.1) # Ralentir un peu pour que ce soit visible dans la GUI
+            print(f"Step {step:03d} | État Ville : {attack_info} | Récompense : {reward:+.2f}")
 
         done = terminated or truncated
         step += 1
+        time.sleep(0.05)
 
     env.close()
-    print("\n[🏁] Duel terminé.")
+    print("\n[🏁] Mission terminée.")
 
 if __name__ == "__main__":
-    run_final_battle()
+    run_excellence_battle()

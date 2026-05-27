@@ -4,97 +4,121 @@ import torch.optim as optim
 import numpy as np
 
 # =====================================================================
-# MODULE 3 : LE cGAN CYBER-PHYSIQUE (Adversarial Attacker)
+# MODULE 3.1 : LE cGAN TEMPOREL (LSTM-based Adversarial Attacker)
 # =====================================================================
-# Architecture d'Excellence : 
-# SUMO étant un simulateur physique, il n'est pas "différentiable" 
-# (on ne peut pas faire de backpropagation directe à travers lui).
-# Pour contourner cela, nous utilisons un véritable cGAN :
-# 1. Le DISCRIMINATEUR agit comme un "Jumeau Numérique" de SUMO. Il
-#    apprend à prédire la récompense du PPO en fonction de l'attaque.
-# 2. Le GÉNÉRATEUR crée les attaques et s'entraîne en faisant de la 
-#    backpropagation à travers le Discriminateur !
+# Évolution "Excellence" : 
+# Contrairement au Perceptron simple (MLP), le LSTM possède une mémoire interne.
+# Cela permet au Générateur de planifier des attaques graduelles et au 
+# Discriminateur de détecter des anomalies sur une fenêtre temporelle.
 # =====================================================================
 
 class Generator(nn.Module):
     """
-    L'IA HACKER (Le Générateur)
-    Observe le trafic et génère un vecteur d'attaque.
+    L'IA HACKER RÉCURRENTE (LSTM Generator)
+    Génère des séquences d'attaques intelligentes.
     """
-    def __init__(self, state_dim, noise_dim=10):
+    def __init__(self, state_dim, noise_dim=10, hidden_dim=128):
         super(Generator, self).__init__()
         self.noise_dim = noise_dim
+        self.hidden_dim = hidden_dim
         
-        # Le réseau prend en entrée l'état de l'intersection + un bruit aléatoire
-        self.net = nn.Sequential(
-            nn.Linear(state_dim + noise_dim, 64),
-            nn.LeakyReLU(0.2),
-            nn.Linear(64, 64),
-            nn.LeakyReLU(0.2),
+        # Le LSTM traite la séquence (État + Bruit)
+        self.lstm = nn.LSTM(
+            input_size=state_dim + noise_dim, 
+            hidden_size=hidden_dim, 
+            num_layers=1, 
+            batch_first=True
         )
         
-        # Sortie 1 : Type d'attaque (3 types + 1 option "Ne rien faire")
-        # Softmax pour obtenir des probabilités
+        # Couches de décision après la mémoire temporelle
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.LayerNorm(64),
+            nn.LeakyReLU(0.2)
+        )
+        
+        # Sortie 1 : Probabilités des types d'attaques
         self.attack_type_layer = nn.Sequential(
-            nn.Linear(64, 4),
+            nn.Linear(64, 8), # Augmenté à 8 pour inclure les variantes DDoS/Sybil
             nn.Softmax(dim=-1)
         )
         
-        # Sortie 2 : Intensité de l'attaque (entre 0.0 et 1.0)
+        # Sortie 2 : Intensité
         self.intensity_layer = nn.Sequential(
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
 
-    def forward(self, state, noise=None):
+    def forward(self, state, hidden=None, noise=None):
+        """
+        state: (Batch, Seq, StateDim) ou (Batch, StateDim)
+        """
+        # Ajustement des dimensions si l'entrée n'a pas de dimension temporelle
+        if state.dim() == 2:
+            state = state.unsqueeze(1) # Ajout dim Seq=1
+            
         if noise is None:
-            noise = torch.randn(state.size(0), self.noise_dim, device=state.device)
+            noise = torch.randn(state.size(0), state.size(1), self.noise_dim, device=state.device)
+        elif noise.dim() == 2:
+            noise = noise.unsqueeze(1)
             
         x = torch.cat([state, noise], dim=-1)
-        features = self.net(x)
+        
+        # Passage dans le LSTM
+        lstm_out, hidden = self.lstm(x, hidden)
+        
+        # On traite le dernier élément de la séquence pour la décision
+        features = self.feature_extractor(lstm_out[:, -1, :])
         
         attack_probs = self.attack_type_layer(features)
         intensity = self.intensity_layer(features)
         
-        # On concatène les probabilités et l'intensité pour former le "Vecteur d'Attaque"
-        return torch.cat([attack_probs, intensity], dim=-1)
+        return torch.cat([attack_probs, intensity], dim=-1), hidden
 
 
 class Discriminator(nn.Module):
     """
-    LE JUMEAU NUMÉRIQUE (Le Discriminateur / Surrogate Model)
-    Il tente d'imiter le moteur SUMO et le PPO. Il prend un État + une Attaque,
-    et tente de prédire la Récompense (ou plutôt, la Pénalité) que le PPO subira.
+    LE JUMEAU NUMÉRIQUE RÉCURRENT (LSTM Surrogate Model)
+    Imite SUMO et le PPO en analysant l'évolution temporelle.
     """
-    def __init__(self, state_dim, attack_dim=5): # 4 probas + 1 intensité
+    def __init__(self, state_dim, attack_dim=9, hidden_dim=128): # 8 probas + 1 intensité
         super(Discriminator, self).__init__()
         
-        self.net = nn.Sequential(
-            nn.Linear(state_dim + attack_dim, 128),
+        self.lstm = nn.LSTM(
+            input_size=state_dim + attack_dim, 
+            hidden_size=hidden_dim, 
+            num_layers=1, 
+            batch_first=True
+        )
+        
+        self.regression_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
             nn.LeakyReLU(0.2),
-            nn.Linear(128, 64),
-            nn.LeakyReLU(0.2),
-            nn.Linear(64, 1) # Prédit un score scalaire (la récompense)
+            nn.Linear(64, 1) # Récompense prédite
         )
 
-    def forward(self, state, attack_vector):
+    def forward(self, state, attack_vector, hidden=None):
+        if state.dim() == 2: state = state.unsqueeze(1)
+        if attack_vector.dim() == 2: attack_vector = attack_vector.unsqueeze(1)
+            
         x = torch.cat([state, attack_vector], dim=-1)
-        predicted_reward = self.net(x)
-        return predicted_reward
+        lstm_out, hidden = self.lstm(x, hidden)
+        
+        predicted_reward = self.regression_head(lstm_out[:, -1, :])
+        return predicted_reward, hidden
 
 # =====================================================================
-# FONCTIONS UTILITAIRES POUR L'ENTRAÎNEMENT DU GAN
+# INITIALISATION D'EXCELLENCE
 # =====================================================================
 
 def init_gan_components(state_dim):
-    """ Initialise les réseaux et les optimiseurs """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    # On initialise avec une dimension d'attaque de 9 (8 types + 1 intensité)
     generator = Generator(state_dim).to(device)
-    discriminator = Discriminator(state_dim).to(device)
+    discriminator = Discriminator(state_dim, attack_dim=9).to(device)
     
-    # On utilise l'optimiseur Adam, standard pour les GANs
-    opt_G = optim.Adam(generator.parameters(), lr=1e-3)
-    opt_D = optim.Adam(discriminator.parameters(), lr=1e-3)
+    opt_G = optim.Adam(generator.parameters(), lr=5e-4) # LR plus petit pour LSTM
+    opt_D = optim.Adam(discriminator.parameters(), lr=5e-4)
     
     return generator, discriminator, opt_G, opt_D, device
