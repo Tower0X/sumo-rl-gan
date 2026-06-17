@@ -352,6 +352,32 @@ class TrafficSignal:
         """Returns the total CO2 emissions (mg/s) of the vehicles in the incoming lanes of the intersection."""
         return sum(self.sumo.lane.getCO2Emission(lane) for lane in self.lanes)
 
+    def get_collisions(self) -> int:
+        """Returns the number of colliding vehicles on the lanes controlled by this signal.
+
+        Reads the real collisions reported by SUMO for the current step
+        (requires the environment to run with ``--collision.action`` enabled,
+        which is the default in SumoEnvironment). Only vehicles whose current
+        lane belongs to this intersection are counted, giving a per-intersection
+        collision signal usable by the VANET Fail-Safe reward.
+        """
+        try:
+            colliding = self.sumo.simulation.getCollidingVehiclesIDList()
+        except Exception:
+            return 0
+        if not colliding:
+            return 0
+        controlled_lanes = set(self.lanes)
+        count = 0
+        for veh in colliding:
+            try:
+                if self.sumo.vehicle.getLaneID(veh) in controlled_lanes:
+                    count += 1
+            except Exception:
+                # Vehicle may have been removed after the collision
+                continue
+        return count
+
     def _get_veh_list(self):
         veh_list = []
         for lane in self.lanes:
