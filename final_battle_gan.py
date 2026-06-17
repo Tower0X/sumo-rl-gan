@@ -5,7 +5,7 @@ from sb3_contrib import RecurrentPPO
 import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
 from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
-from sumo_rl.environment.gan_attacker import Generator
+from sumo_rl.environment.gan_attacker import load_generator_strict, GANLoadError
 
 def run_excellence_battle():
     print("======================================================")
@@ -22,7 +22,8 @@ def run_excellence_battle():
         delta_time=5,
         single_agent=True, # Utilisation du modèle partagé sur l'espace d'action global
         observation_class=VANETObservationFunction,
-        reward_fn='vanet'
+        reward_fn='vanet',
+        collision_action='warn'  # Collisions réellement mesurées
     )
 
     # 2. Chargement du Défenseur RecurrentPPO (LSTM)
@@ -38,15 +39,16 @@ def run_excellence_battle():
             print("[!] Échec critique: aucun modèle de défense trouvé.")
             return
 
-    # 3. Chargement de l'Attaquant LSTM-GAN
+    # 3. Chargement de l'Attaquant LSTM-GAN (STRICT: pas de duel sur poids aléatoires)
     print("[*] Chargement du Hacker Temporel (LSTM-GAN)...")
     state_dim = env.observation_space.shape[0]
-    gan_hacker = Generator(state_dim)
     try:
-        gan_hacker.load_state_dict(torch.load("outputs/gan/generator_model_lstm.pth"))
-        gan_hacker.eval()
-    except:
-        print("[⚠️] Modèle LSTM-GAN non trouvé. L'attaquant utilisera une stratégie hybride.")
+        gan_hacker = load_generator_strict(state_dim)
+    except GANLoadError as exc:
+        print(f"[!] Échec critique du chargement du GAN: {exc}")
+        print("[!] Duel annulé: refus de combattre un attaquant non entraîné (poids aléatoires).")
+        env.close()
+        return
 
     obs, info = env.reset()
     done = False
