@@ -120,8 +120,15 @@ class SumoEnvironment(gym.Env):
         sumo_warnings: bool = True,
         additional_sumo_cmd: Optional[str] = None,
         render_mode: Optional[str] = None,
+        collision_action: Optional[str] = "warn",
     ) -> None:
-        """Initialize the environment."""
+        """Initialize the environment.
+
+        collision_action (Optional[str]): Value passed to SUMO's ``--collision.action``
+            (e.g. 'warn', 'none', 'teleport', 'remove'). Default 'warn' so that
+            collisions are actually DETECTED and counted instead of being silently
+            masked. Set to None to keep SUMO's default behaviour.
+        """
         assert render_mode is None or render_mode in self.metadata["render_modes"], "Invalid render mode."
         self.render_mode = render_mode
         self.virtual_display = virtual_display
@@ -157,6 +164,7 @@ class SumoEnvironment(gym.Env):
         self.fixed_ts = fixed_ts
         self.sumo_warnings = sumo_warnings
         self.additional_sumo_cmd = additional_sumo_cmd
+        self.collision_action = collision_action
         self.add_system_info = add_system_info
         self.add_per_agent_info = add_per_agent_info
         self.label = str(SumoEnvironment.CONNECTION_LABEL)
@@ -223,6 +231,8 @@ class SumoEnvironment(gym.Env):
             "--time-to-teleport",
             str(self.time_to_teleport),
         ]
+        if self.collision_action is not None:
+            sumo_cmd.extend(["--collision.action", str(self.collision_action)])
         if self.begin_time > 0:
             sumo_cmd.append(f"-b {self.begin_time}")
         if self.sumo_seed == "random":
@@ -276,6 +286,7 @@ class SumoEnvironment(gym.Env):
         self.num_arrived_vehicles = 0
         self.num_departed_vehicles = 0
         self.num_teleported_vehicles = 0
+        self.num_collisions = 0
 
         if self.single_agent:
             return self._compute_observations()[self.ts_ids[0]], self._compute_info()
@@ -421,6 +432,7 @@ class SumoEnvironment(gym.Env):
         self.num_arrived_vehicles += self.sumo.simulation.getArrivedNumber()
         self.num_departed_vehicles += self.sumo.simulation.getDepartedNumber()
         self.num_teleported_vehicles += self.sumo.simulation.getEndingTeleportNumber()
+        self.num_collisions += self.sumo.simulation.getCollidingVehiclesNumber()
 
     def _get_system_info(self):
         vehicles = self.sumo.vehicle.getIDList()
@@ -436,6 +448,7 @@ class SumoEnvironment(gym.Env):
             "system_total_arrived": self.num_arrived_vehicles,
             "system_total_departed": self.num_departed_vehicles,
             "system_total_teleported": self.num_teleported_vehicles,
+            "system_total_collisions": self.num_collisions,
             "system_total_waiting_time": sum(waiting_times),
             "system_mean_waiting_time": 0.0 if len(vehicles) == 0 else np.mean(waiting_times),
             "system_mean_speed": 0.0 if len(vehicles) == 0 else np.mean(speeds),
