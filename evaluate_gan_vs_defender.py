@@ -7,9 +7,12 @@ from sumo_rl.environment.observations import VANETObservationFunction
 from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
 from sumo_rl.environment.gan_attacker import load_generator_strict, GANLoadError
 
-def run_excellence_battle():
+import os
+
+
+def evaluate_gan_vs_defender():
     print("======================================================")
-    print("🏆 DUEL D'EXCELLENCE : BOUCLIER URBAIN vs LSTM-GAN")
+    print("ÉVALUATION : DÉFENSEUR MARL vs ATTAQUANT GAN (LSTM)")
     print("======================================================\n")
 
     # 1. Init Environnement 4x4 avec GUI
@@ -26,18 +29,21 @@ def run_excellence_battle():
         collision_action='warn'  # Collisions réellement mesurées
     )
 
-    # 2. Chargement du Défenseur RecurrentPPO (LSTM)
+    # 2. Chargement du Défenseur (RecurrentPPO en priorité, repli MLP explicite)
     print("[*] Chargement du Défenseur Temporel (RecurrentPPO)...")
-    try:
-        defender = RecurrentPPO.load("outputs/recurrent_urban_shield_4x4")
-    except:
-        print("[!] Erreur: recurrent_urban_shield_4x4 introuvable. Tentative avec le modèle MLP...")
-        try:
-            from stable_baselines3 import PPO
-            defender = PPO.load("outputs/ppo_marl_4x4_model")
-        except:
-            print("[!] Échec critique: aucun modèle de défense trouvé.")
-            return
+    recurrent_path = "outputs/recurrent_urban_shield_4x4"
+    mlp_path = "outputs/ppo_marl_4x4_model"
+    if os.path.exists(recurrent_path + ".zip"):
+        defender = RecurrentPPO.load(recurrent_path)
+        print(f"[*] Défenseur récurrent chargé: {recurrent_path}.zip")
+    elif os.path.exists(mlp_path + ".zip"):
+        from stable_baselines3 import PPO
+        defender = PPO.load(mlp_path)
+        print(f"[*] Repli sur le défenseur MLP: {mlp_path}.zip")
+    else:
+        print("[!] Échec critique: aucun modèle de défense trouvé (ni récurrent ni MLP).")
+        env.close()
+        return
 
     # 3. Chargement de l'Attaquant LSTM-GAN (STRICT: pas de duel sur poids aléatoires)
     print("[*] Chargement du Hacker Temporel (LSTM-GAN)...")
@@ -91,4 +97,4 @@ def run_excellence_battle():
     print("\n[🏁] Mission terminée.")
 
 if __name__ == "__main__":
-    run_excellence_battle()
+    evaluate_gan_vs_defender()
