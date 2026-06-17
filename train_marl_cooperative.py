@@ -1,92 +1,103 @@
+"""Cooperative multi-agent training for the 4x4 VANET grid (parameter sharing).
+
+The 4x4-Lucas network has 16 traffic lights. Instead of controlling a single
+junction with ``single_agent=True``, we use the PettingZoo ``parallel_env``
+together with SuperSuit so that ONE shared policy is trained from the pooled
+experience of ALL 16 junctions (parameter sharing).
+
+The policy is a RecurrentPPO (LSTM), which matches the temporal defender loaded
+by the dashboard (``sim_runner.py``) and the evaluation script
+(``evaluate_gan_vs_defender.py``) from ``outputs/recurrent_urban_shield_4x4``.
+"""
+
 import os
 import time
-import gymnasium as gym
-from stable_baselines3 import PPO
+
+from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.vec_env import VecMonitor
 import supersuit as ss
 
 import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
 
-def train_marl_cooperative_defense():
-    print("==================================================================")
-    print("🛡️ DÉPLOIEMENT MARL AUDACIEUX : GRILLE URBAINE 4x4 (16 AGENTS)")
-    print("==================================================================")
-    print("[*] Objectif : Préparer l'architecture de défense coopérative pour le GAN.")
-    print("[*] Méthode : Parameter Sharing (Les 16 feux partagent un seul et même 'Cerveau' PPO).")
-    print("[*] Avantage : Apprentissage 16x plus rapide. Résilience distribuée.\n")
 
-    # Utilisation du réseau 4x4 existant
-    net_file = "sumo_rl/nets/4x4-Lucas/4x4.net.xml"
-    route_file = "sumo_rl/nets/4x4-Lucas/4x4c1c2c1c2.rou.xml"
+NET_FILE = "sumo_rl/nets/4x4-Lucas/4x4.net.xml"
+ROUTE_FILE = "sumo_rl/nets/4x4-Lucas/4x4c1c2c1c2.rou.xml"
+MODEL_PATH = "outputs/recurrent_urban_shield_4x4"
 
-    # Création de l'environnement Multi-Agent PettingZoo (Parallel API)
-    print("[*] Initialisation de l'environnement parallèle PettingZoo...")
+
+def train_marl_cooperative(total_timesteps: int = 60000, num_seconds: int = 15000):
+    """Train a shared RecurrentPPO defender over the 16-junction grid.
+
+    Args:
+        total_timesteps: number of environment steps to train for.
+        num_seconds: simulated seconds per SUMO episode.
+    """
+    print("==================================================================")
+    print("  Cooperative MARL training - 4x4 grid (16 traffic lights)")
+    print("  Shared RecurrentPPO policy via PettingZoo + SuperSuit")
+    print("==================================================================\n")
+
+    # 1. Multi-agent environment: one agent per traffic light.
+    print("[*] Building PettingZoo parallel environment...")
     env = sumo_rl.parallel_env(
-        net_file=net_file,
-        route_file=route_file,
-        out_csv_name="outputs/marl_4x4_training",
+        net_file=NET_FILE,
+        route_file=ROUTE_FILE,
+        out_csv_name="outputs/marl_recurrent_4x4",
         use_gui=False,
-        num_seconds=10000,
+        num_seconds=num_seconds,
         delta_time=5,
         observation_class=VANETObservationFunction,
-        reward_fn='vanet' # On garde notre fonction sécurisée !
+        reward_fn="vanet",
+        collision_action="warn",  # train against REAL collisions
     )
 
-    # ---------------------------------------------------------
-    # LA TOUCHE D'EXCELLENCE : SUPERSUIT WRAPPERS
-    # ---------------------------------------------------------
-    # Pour que Stable Baselines 3 puisse entraîner 16 agents simultanément
-    # dans une même simulation, nous convertissons l'environnement PettingZoo
-    # en un VectorEnvironment classique grâce à SuperSuit.
-    # Cela permet le "Parameter Sharing" : le PPO apprend des expériences 
-    # de TOUS les carrefours en même temps. S'il résout une attaque au Nord, 
-    # le carrefour au Sud saura immédiatement s'en défendre !
-    
-    print("[*] Application du blindage (SuperSuit) pour le Parameter Sharing...")
+    # 2. Parameter sharing: convert the multi-agent env into a single vec env
+    #    so one policy learns from every junction simultaneously.
+    print("[*] Wrapping with SuperSuit for parameter sharing...")
     try:
         env = ss.pettingzoo_env_to_vec_env_v1(env)
-        env = ss.concat_vec_envs_v1(env, num_vec_envs=1, num_cpus=1, base_class='stable_baselines3')
+        env = ss.concat_vec_envs_v1(env, num_vec_envs=1, num_cpus=1, base_class="stable_baselines3")
         env = VecMonitor(env)
-    except Exception as e:
-        print(f"[!] Erreur de configuration SuperSuit : {e}")
-        print("[!] Veuillez installer supersuit : pip install supersuit")
+    except Exception as exc:
+        print(f"[!] SuperSuit wrapping failed: {exc}")
+        print("[!] Install SuperSuit with: pip install supersuit")
         return
 
-    # Initialisation de l'Agent PPO Partagé
-    print("[*] Création de la Matrice PPO Centrale...")
-    model = PPO(
-        "MlpPolicy",
+    # 3. Recurrent (LSTM) defender, matching the dashboard/evaluator expectation.
+    print("[*] Creating RecurrentPPO (MlpLstmPolicy) defender...")
+    model = RecurrentPPO(
+        "MlpLstmPolicy",
         env,
         verbose=1,
-        learning_rate=3e-4,
-        n_steps=256,
-        batch_size=256,
+        learning_rate=2e-4,
+        n_steps=512,
+        batch_size=128,
         n_epochs=10,
         gamma=0.99,
-        tensorboard_log="./outputs/marl_tensorboard/"
+        gae_lambda=0.95,
+        clip_range=0.2,
+        tensorboard_log="./outputs/recurrent_marl_tensorboard/",
     )
 
-    # Entraînement
-    total_timesteps = 50000 # Entraînement plus long justifié par la complexité 4x4
-    print(f"\n[*] 🚀 DÉMARRAGE DE L'ENTRAÎNEMENT MARL ({total_timesteps} étapes)...")
-    
+    print(f"\n[*] Training for {total_timesteps} timesteps...")
+    start = time.time()
     try:
         model.learn(total_timesteps=total_timesteps)
-        print("\n[*] ✅ ENTRAÎNEMENT TERMINÉ AVEC SUCCÈS !")
-        
-        # Sauvegarde
+        minutes = (time.time() - start) / 60
+        print(f"\n[*] Training finished in {minutes:.1f} min.")
         os.makedirs("outputs", exist_ok=True)
-        model.save("outputs/ppo_marl_4x4_model")
-        print("[*] Le Cerveau Centralisé (Hive Mind) a été sauvegardé sous 'outputs/ppo_marl_4x4_model.zip'.")
-        
-    except Exception as e:
-        print(f"\n[!] Erreur détectée lors de l'entraînement : {e}")
+        model.save(MODEL_PATH)
+        print(f"[*] Shared defender saved to '{MODEL_PATH}.zip'.")
+    except Exception as exc:
+        print(f"\n[!] Training failed: {exc}")
+        raise
     finally:
         try:
             env.close()
-        except:
+        except Exception:
             pass
 
+
 if __name__ == "__main__":
-    train_marl_cooperative_defense()
+    train_marl_cooperative()
