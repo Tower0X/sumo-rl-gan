@@ -1,3 +1,4 @@
+import os
 import time
 import torch
 import numpy as np
@@ -6,9 +7,6 @@ import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
 from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
 from sumo_rl.environment.gan_attacker import load_generator_strict, GANLoadError
-
-import os
-
 
 def evaluate_gan_vs_defender():
     print("======================================================")
