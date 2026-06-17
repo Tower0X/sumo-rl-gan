@@ -92,6 +92,25 @@ class TrafficSignal:
         self.sumo = sumo
         self.comm_ok = True  # VANET: Communication status flag
 
+        # --- Paramètres de la récompense Fail-Safe VANET (Eq. 3.4 / 3.5) ---
+        # Tous overridables; aucune valeur magique enfouie dans la formule.
+        #   alpha     : poids de la pression (déséquilibre entrant/sortant)
+        #   beta      : poids de la file d'attente
+        #   kappa_coll: pénalité par véhicule en collision (événement grave)
+        #   kappa_quad: pénalité quadratique en mode dégradé (perte V2X)
+        #   q_safe    : seuil de file considéré sûr (S = max(0, queue - q_safe))
+        #   emergency_penalty       : pénalité par freinage d'urgence
+        #   emergency_decel_threshold : seuil d'accélération (m/s^2) du freinage d'urgence
+        self.vanet_reward_params = {
+            "alpha": 0.4,
+            "beta": 0.6,
+            "kappa_coll": 10.0,
+            "kappa_quad": 0.25,
+            "q_safe": 5.0,
+            "emergency_penalty": 5.0,
+            "emergency_decel_threshold": -4.5,
+        }
+
         if type(self.reward_fn) is list:
             self.reward_dim = len(self.reward_fn)
             self.reward_list = [self._get_reward_fn_from_string(reward_fn) for reward_fn in self.reward_fn]
@@ -237,29 +256,63 @@ class TrafficSignal:
         return reward
 
     def _vanet_reward(self):
-        """Reward function for VANET that penalizes emergency braking and dangerous queues during network loss."""
-        # 1. Base traffic fluidity reward (diff-waiting-time)
-        ts_wait = sum(self.get_accumulated_waiting_time_per_lane()) / 100.0
-        base_reward = self.last_ts_waiting_time - ts_wait
-        self.last_ts_waiting_time = ts_wait
-        
-        # 2. Emergency braking penalty
-        emergency_braking_penalty = 0.0
-        vehs = self._get_veh_list()
-        for v in vehs:
-            # Acceleration < -4.5 m/s^2 is typically hard/emergency braking
-            if self.sumo.vehicle.getAcceleration(v) < -4.5:
-                emergency_braking_penalty -= 5.0 # Heavy penalty per vehicle
-                
-        # 3. Network disruption penalty
-        network_penalty = 0.0
-        if not getattr(self, 'comm_ok', True):
-            # If V2X communications are jammed/down, large queues become highly dangerous
-            total_queue = self.get_total_queued()
-            if total_queue > 5:
-                network_penalty -= (total_queue - 5) * 0.5
-                
-        return base_reward + emergency_braking_penalty + network_penalty
+        """Two-phase Fail-Safe VANET reward (thesis Eq. 3.4 / 3.5).
+
+        The reward switches EXPLICITLY on the communication status ``comm_ok``,
+        which is written by the cyber-physical attack orchestrator. This is the
+        core scientific contribution: the agent is rewarded under a different
+        objective when it loses V2X connectivity and must drive conservatively.
+
+        Eq. 3.4 -- Normal mode (comm_ok = 1)::
+
+            R = -(alpha*pressure + beta*queue) - kappa_coll*collisions
+                - emergency_penalty*emergency
+
+        Eq. 3.5 -- Degraded mode (comm_ok = 0), adds the quadratic term::
+
+            R = -(alpha*pressure + beta*queue) - kappa_quad*S^2
+                - kappa_coll*collisions - emergency_penalty*emergency
+
+        where ``S = max(0, total_queue - q_safe)`` is the dangerous over-queue
+        accumulated while the agent is driving "blind". The quadratic shape makes
+        danger grow non-linearly with unobservable congestion and is exactly
+        zero in the safe regime (continuous at ``q_safe``).
+        """
+        p = self.vanet_reward_params
+
+        # --- Grandeurs physiques (échelles comparables pour que alpha/beta aient un sens) ---
+        n_lanes = max(1, len(self.lanes))
+        # Pression normalisée: |entrants - sortants| par voie. La valeur absolue
+        # capture le DÉSÉQUILIBRE (objectif: minimiser la congestion directionnelle).
+        pressure = abs(self.get_pressure()) / n_lanes
+        total_queue = self.get_total_queued()
+        queue = total_queue / n_lanes  # file moyenne par voie
+
+        # --- Collisions réelles par intersection (cf. get_collisions, MR1a) ---
+        collisions = self.get_collisions()
+
+        # --- Freinages d'urgence (accélération < seuil) ---
+        emergency = 0
+        threshold = p["emergency_decel_threshold"]
+        for v in self._get_veh_list():
+            try:
+                if self.sumo.vehicle.getAcceleration(v) < threshold:
+                    emergency += 1
+            except Exception:
+                continue
+
+        # --- Terme commun aux deux phases ---
+        base = -(p["alpha"] * pressure + p["beta"] * queue)
+        common = base - p["kappa_coll"] * collisions - p["emergency_penalty"] * emergency
+
+        # --- COMMUTATION Fail-Safe sur comm_ok ---
+        if getattr(self, "comm_ok", True):
+            reward = common  # Eq. 3.4 (mode normal)
+        else:
+            S = max(0.0, total_queue - p["q_safe"])
+            reward = common - p["kappa_quad"] * (S ** 2)  # Eq. 3.5 (mode dégradé)
+
+        return float(reward)
 
     def _observation_fn_default(self):
         phase_id = [1 if self.green_phase == i else 0 for i in range(self.num_green_phases)]  # one-hot encoding
@@ -351,6 +404,32 @@ class TrafficSignal:
     def get_total_co2(self) -> float:
         """Returns the total CO2 emissions (mg/s) of the vehicles in the incoming lanes of the intersection."""
         return sum(self.sumo.lane.getCO2Emission(lane) for lane in self.lanes)
+
+    def get_collisions(self) -> int:
+        """Returns the number of colliding vehicles on the lanes controlled by this signal.
+
+        Reads the real collisions reported by SUMO for the current step
+        (requires the environment to run with ``--collision.action`` enabled,
+        which is the default in SumoEnvironment). Only vehicles whose current
+        lane belongs to this intersection are counted, giving a per-intersection
+        collision signal usable by the VANET Fail-Safe reward.
+        """
+        try:
+            colliding = self.sumo.simulation.getCollidingVehiclesIDList()
+        except Exception:
+            return 0
+        if not colliding:
+            return 0
+        controlled_lanes = set(self.lanes)
+        count = 0
+        for veh in colliding:
+            try:
+                if self.sumo.vehicle.getLaneID(veh) in controlled_lanes:
+                    count += 1
+            except Exception:
+                # Vehicle may have been removed after the collision
+                continue
+        return count
 
     def _get_veh_list(self):
         veh_list = []

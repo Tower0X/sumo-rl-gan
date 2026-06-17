@@ -1,3 +1,4 @@
+import os
 import time
 import torch
 import numpy as np
@@ -5,11 +6,11 @@ from sb3_contrib import RecurrentPPO
 import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
 from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
-from sumo_rl.environment.gan_attacker import Generator
+from sumo_rl.environment.gan_attacker import load_generator_strict, GANLoadError
 
-def run_excellence_battle():
+def evaluate_gan_vs_defender():
     print("======================================================")
-    print("🏆 DUEL D'EXCELLENCE : BOUCLIER URBAIN vs LSTM-GAN")
+    print("ÉVALUATION : DÉFENSEUR MARL vs ATTAQUANT GAN (LSTM)")
     print("======================================================\n")
 
     # 1. Init Environnement 4x4 avec GUI
@@ -22,31 +23,36 @@ def run_excellence_battle():
         delta_time=5,
         single_agent=True, # Utilisation du modèle partagé sur l'espace d'action global
         observation_class=VANETObservationFunction,
-        reward_fn='vanet'
+        reward_fn='vanet',
+        collision_action='warn'  # Collisions réellement mesurées
     )
 
-    # 2. Chargement du Défenseur RecurrentPPO (LSTM)
+    # 2. Chargement du Défenseur (RecurrentPPO en priorité, repli MLP explicite)
     print("[*] Chargement du Défenseur Temporel (RecurrentPPO)...")
-    try:
-        defender = RecurrentPPO.load("outputs/recurrent_urban_shield_4x4")
-    except:
-        print("[!] Erreur: recurrent_urban_shield_4x4 introuvable. Tentative avec le modèle MLP...")
-        try:
-            from stable_baselines3 import PPO
-            defender = PPO.load("outputs/ppo_marl_4x4_model")
-        except:
-            print("[!] Échec critique: aucun modèle de défense trouvé.")
-            return
+    recurrent_path = "outputs/recurrent_urban_shield_4x4"
+    mlp_path = "outputs/ppo_marl_4x4_model"
+    if os.path.exists(recurrent_path + ".zip"):
+        defender = RecurrentPPO.load(recurrent_path)
+        print(f"[*] Défenseur récurrent chargé: {recurrent_path}.zip")
+    elif os.path.exists(mlp_path + ".zip"):
+        from stable_baselines3 import PPO
+        defender = PPO.load(mlp_path)
+        print(f"[*] Repli sur le défenseur MLP: {mlp_path}.zip")
+    else:
+        print("[!] Échec critique: aucun modèle de défense trouvé (ni récurrent ni MLP).")
+        env.close()
+        return
 
-    # 3. Chargement de l'Attaquant LSTM-GAN
+    # 3. Chargement de l'Attaquant LSTM-GAN (STRICT: pas de duel sur poids aléatoires)
     print("[*] Chargement du Hacker Temporel (LSTM-GAN)...")
     state_dim = env.observation_space.shape[0]
-    gan_hacker = Generator(state_dim)
     try:
-        gan_hacker.load_state_dict(torch.load("outputs/gan/generator_model_lstm.pth"))
-        gan_hacker.eval()
-    except:
-        print("[⚠️] Modèle LSTM-GAN non trouvé. L'attaquant utilisera une stratégie hybride.")
+        gan_hacker = load_generator_strict(state_dim)
+    except GANLoadError as exc:
+        print(f"[!] Échec critique du chargement du GAN: {exc}")
+        print("[!] Duel annulé: refus de combattre un attaquant non entraîné (poids aléatoires).")
+        env.close()
+        return
 
     obs, info = env.reset()
     done = False
@@ -89,4 +95,4 @@ def run_excellence_battle():
     print("\n[🏁] Mission terminée.")
 
 if __name__ == "__main__":
-    run_excellence_battle()
+    evaluate_gan_vs_defender()

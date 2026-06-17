@@ -4,7 +4,7 @@ import numpy as np
 import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
 from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
-from sumo_rl.environment.gan_attacker import Generator
+from sumo_rl.environment.gan_attacker import load_generator_strict, GANLoadError
 from sb3_contrib import RecurrentPPO
 from shared_state import state
 
@@ -23,7 +23,8 @@ def run_simulation():
             delta_time=5,
             single_agent=True,
             observation_class=VANETObservationFunction,
-            reward_fn='vanet'
+            reward_fn='vanet',
+            collision_action='warn'  # Collisions réellement mesurées
         )
     except Exception as e:
         state.add_log(f"❌ Erreur SUMO: {str(e)}", "error")
@@ -55,18 +56,17 @@ def run_simulation():
             state.running = False
             return
 
-    # 3. Chargement de l'Attaquant LSTM-GAN
+    # 3. Chargement de l'Attaquant LSTM-GAN (STRICT: jamais de poids aléatoires)
     state.add_log("[*] Chargement du Neural Hacker (LSTM GAN)...", "info")
     state_dim = env.observation_space.shape[0]
-    gan_hacker = Generator(state_dim)
     gan_loaded = False
     gan_hidden = None
+    gan_hacker = None
     try:
-        gan_hacker.load_state_dict(torch.load("outputs/gan/generator_model_lstm.pth"))
-        gan_hacker.eval()
+        gan_hacker = load_generator_strict(state_dim)
         gan_loaded = True
-    except:
-        state.add_log("⚠️ LSTM-GAN non trouvé. Mode Duel réduit.", "warning")
+    except GANLoadError as exc:
+        state.add_log(f"⚠️ GAN non chargé ({exc}). Mode adversarial désactivé.", "warning")
 
     obs, info = env.reset()
     done = False
@@ -95,6 +95,8 @@ def run_simulation():
                 active_intensity = manual_virulence
                 
         elif current_mode == "adversarial_gan":
+            if not gan_loaded:
+                state.add_log("⛔ Mode GAN demandé mais aucun GAN entraîné chargé. Attaque ignorée.", "error")
             if gan_loaded:
                 with torch.no_grad():
                     state_tensor = torch.FloatTensor(obs).unsqueeze(0).unsqueeze(0)
