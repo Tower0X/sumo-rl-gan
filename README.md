@@ -6,15 +6,18 @@
 ![GAN](https://img.shields.io/badge/Adversarial-cGAN-red.svg)
 
 ## 📌 Présentation du Projet
-Ce projet implémente une plateforme de **Co-Simulation (Trafic-Réseau)** avancée pour l'audit de résilience des infrastructures VANET (Vehicular Ad-hoc Networks). L'objectif est de concevoir un contrôleur de trafic intelligent capable de maintenir la sécurité routière (zéro collision) même en présence de cyber-attaques sophistiquées.
+Ce projet implémente une plateforme de **Co-Simulation (Trafic-Réseau)** pour l'audit de résilience des infrastructures VANET (Vehicular Ad-hoc Networks). L'objectif est de concevoir un contrôleur de trafic par apprentissage par renforcement qui **mesure et minimise** les collisions et les freinages d'urgence, y compris lorsque les communications V2X sont dégradées par des cyber-attaques.
+
+> **Note méthodologique.** La sécurité routière n'est pas postulée : les collisions sont **réellement mesurées** via SUMO (`--collision.action`) et la TraCI API, et pénalisées explicitement dans la récompense.
 
 ### Architecture Triple-Module
-1.  **Module Défense (MARL-PPO) :** Un agent d'Apprentissage par Renforcement Multi-Agent entraîné avec une fonction de récompense "Fail-Safe". Il gère les feux de signalisation en anticipant les congestions et les freinages d'urgence.
-2.  **Module Attaque (Orchestrateur) :** Un middleware capable d'injecter trois types de perturbations :
-    *   **DoS Temporel :** Latence accrue sur les communications V2X.
-    *   **Data Poisoning :** Corruption des données de télémétrie des capteurs.
-    *   **Sybil Attack :** Simulation de faux véhicules pour saturer l'intersection.
-3.  **Module Adversarial (cGAN) :** Une IA générative qui apprend à optimiser la virulence des attaques en fonction de l'état du trafic, créant un "jeu Min-Max" contre le défenseur PPO.
+1.  **Module Défense (MARL-PPO) :** Un agent d'Apprentissage par Renforcement entraîné avec une fonction de récompense **Fail-Safe à deux phases** (Eq. 3.4 / 3.5). La récompense commute sur l'état de communication `comm_ok` : en mode normal elle minimise pression + file ; en mode dégradé (perte V2X) elle ajoute un terme **quadratique** `−κ_quad·S²` sur la sur-file dangereuse `S = max(0, file − Q_safe)`. Les collisions et freinages d'urgence sont pénalisés dans les deux phases.
+2.  **Module Attaque (Orchestrateur) :** Un middleware qui intercepte le vecteur d'observation et injecte **8 familles d'attaques** (`AttackType`) en ciblant exactement les bonnes features, sans jamais violer l'espace d'observation `Box[0,1]` :
+    *   `TEMPORAL_DOS`, `FLOODING_DDOS`, `SLOWLORIS_DDOS` — perturbation de la latence V2X.
+    *   `DATA_POISONING` — dissimulation des files d'attente (capteurs).
+    *   `GHOST_VEHICLES`, `POSITION_JITTER` — attaques Sybil sur la densité.
+    *   `JAMMER` — coupure totale de la communication (`comm_ok = 0`).
+3.  **Module Adversarial (GAN LSTM) :** Un générateur récurrent qui produit des séquences d'attaques conditionnées par l'état du trafic. Le chargement du modèle est **strict** : aucun duel n'est lancé avec des poids non entraînés.
 
 ---
 
@@ -44,22 +47,26 @@ pip install -e .
 
 ## 🚀 Utilisation
 
-### Phase 1 : Entraînement du Défenseur (RL)
-Pour entraîner l'agent PPO à gérer le trafic de manière sécurisée :
+### Phase 1 : Entraînement du Défenseur (MARL)
+Pour entraîner l'agent RecurrentPPO sur la grille 4x4 :
 ```bash
-python train_vanet_ppo.py
+python train_marl_grid.py
 ```
 
-### Phase 2 : Entraînement de l'Attaquant (cGAN)
-Une fois le défenseur prêt, lancez l'entraînement adversarial pour tester sa résilience :
+### Phase 2 : Évaluation GAN vs Défenseur
+Pour évaluer le défenseur entraîné face à l'attaquant GAN (avec interface SUMO) :
 ```bash
-python train_gan_adversarial.py
+python evaluate_gan_vs_defender.py
 ```
 
-### Phase 3 : Simulation de Bataille Finale
-Pour visualiser l'affrontement entre le PPO et le GAN avec l'interface graphique SUMO :
+### Phase 3 : Dashboard de supervision
 ```bash
-python final_battle_gan.py
+streamlit run app_dashboard.py   # ou, sous Windows : run_dashboard.bat
+```
+
+### Tests
+```bash
+pytest tests/
 ```
 
 ---
