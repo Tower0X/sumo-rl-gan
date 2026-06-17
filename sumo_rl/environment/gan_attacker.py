@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -110,6 +112,46 @@ class Discriminator(nn.Module):
 # =====================================================================
 # INITIALISATION D'EXCELLENCE
 # =====================================================================
+
+# Chemin canonique du générateur LSTM entraîné (source de vérité unique).
+DEFAULT_GENERATOR_PATH = "outputs/gan/generator_model_lstm.pth"
+
+
+class GANLoadError(RuntimeError):
+    """Raisée quand le générateur GAN ne peut pas être chargé correctement."""
+
+
+def load_generator_strict(state_dim, path=DEFAULT_GENERATOR_PATH, device=None):
+    """Charge le générateur LSTM de manière STRICTE.
+
+    Contrairement à l'ancien ``try/except`` nu qui laissait l'attaquant tourner
+    avec des poids ALÉATOIRES (rendant tout 'duel' factice), cette fonction échoue
+    bruyamment:
+    - ``GANLoadError`` si le fichier de poids est absent;
+    - ``GANLoadError`` si l'architecture ne correspond pas (mismatch state_dict).
+
+    L'appelant DOIT gérer cette exception et NE PAS poursuivre un duel sans GAN
+    réellement entraîné.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not os.path.exists(path):
+        raise GANLoadError(
+            f"Modèle GAN introuvable: '{path}'. Entraînez le générateur avant de lancer "
+            f"un duel adversarial (refus de tourner sur des poids aléatoires)."
+        )
+    generator = Generator(state_dim).to(device)
+    try:
+        state_dict = torch.load(path, map_location=device)
+        generator.load_state_dict(state_dict)
+    except Exception as exc:  # mismatch d'architecture, fichier corrompu, etc.
+        raise GANLoadError(
+            f"Échec du chargement du générateur depuis '{path}': {exc}. "
+            f"Vérifiez que state_dim={state_dim} correspond au modèle entraîné."
+        ) from exc
+    generator.eval()
+    return generator
+
 
 def init_gan_components(state_dim):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
