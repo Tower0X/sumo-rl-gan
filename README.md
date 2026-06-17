@@ -45,21 +45,33 @@ pip install -e .
 
 ---
 
-## 🚀 Utilisation
+## 🚀 Utilisation (pipeline complet)
 
-### Phase 1 : Entraînement du Défenseur (MARL)
-Pour entraîner l'agent RecurrentPPO sur la grille 4x4 :
+Les phases s'enchaînent : on entraîne un défenseur, puis l'attaquant GAN contre ce défenseur, puis on évalue le duel.
+
+### Phase 1 : Défenseur mono-intersection (mise au point rapide)
 ```bash
-python train_marl_grid.py
+python train_vanet_ppo.py        # PPO sur 2way-single-intersection -> outputs/ppo_vanet_model
 ```
 
-### Phase 2 : Évaluation GAN vs Défenseur
-Pour évaluer le défenseur entraîné face à l'attaquant GAN (avec interface SUMO) :
+### Phase 2 : Défenseur coopératif sur la grille 4x4 (MARL, 16 feux)
+```bash
+python train_marl_cooperative.py # RecurrentPPO + SuperSuit (parameter sharing)
+                                 # -> outputs/recurrent_urban_shield_4x4
+```
+> `train_marl_grid.py` est une variante d'entraînement récurrent conservée pour comparaison.
+
+### Phase 3 : Entraînement adversarial du GAN
+```bash
+python train_gan_adversarial.py  # GAN attaquant vs défenseur gelé -> outputs/gan/
+```
+
+### Phase 4 : Évaluation GAN vs Défenseur (interface SUMO)
 ```bash
 python evaluate_gan_vs_defender.py
 ```
 
-### Phase 3 : Dashboard de supervision
+### Dashboard de supervision
 ```bash
 streamlit run app_dashboard.py   # ou, sous Windows : run_dashboard.bat
 ```
