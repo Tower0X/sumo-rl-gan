@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
-from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
+from sumo_rl.environment.attack_controller import global_orchestrator, AttackType, compute_obs_layout
 from sumo_rl.environment.gan_attacker import load_generator_strict, GANLoadError
 from sb3_contrib import RecurrentPPO
 from shared_state import state
@@ -129,8 +129,12 @@ def run_simulation():
             state.waiting_time_history.append(step_info.get('system_total_waiting_time', 0))
             latency = float(np.abs(next_obs[-2]) * 10)
             state.latency_history.append(latency)
-            mid = len(next_obs) // 2
-            total_queues = int(np.sum(next_obs[mid:-2]) * 10)
+            # Indexation EXACTE du bloc queue (fini le len//2 approximatif qui
+            # melangeait one-hot de phase, min_green et densites).
+            layout = compute_obs_layout(env.traffic_signals[env.ts_ids[0]])
+            oq = layout["offset_queue"]
+            n_lanes = layout["n_lanes"]
+            total_queues = int(np.sum(next_obs[oq:oq + n_lanes]) * 10)
             state.queue_history.append(total_queues)
 
         obs = next_obs
