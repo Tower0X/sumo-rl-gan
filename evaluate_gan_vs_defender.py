@@ -1,98 +1,118 @@
+"""Evaluation du duel : DEFENSEUR MARL (16 feux) vs ATTAQUANT SURROGATE (LSTM).
+
+Vrai MARL : l'environnement PettingZoo parallele expose les 16 feux de la
+grille 4x4 comme agents simultanes ; le cerveau RecurrentPPO partage les
+controle tous (parameter sharing). L'attaquant surrogate genere des attaques
+adaptatives ciblant chaque intersection par son id, via l'orchestrateur
+cyber-physique.
+
+Chargement STRICT de l'attaquant : aucun duel sur poids aleatoires.
+"""
 import os
 import time
-import torch
+
 import numpy as np
+import torch
 from sb3_contrib import RecurrentPPO
+
 import sumo_rl
 from sumo_rl.environment.observations import VANETObservationFunction
-from sumo_rl.environment.attack_controller import global_orchestrator, AttackType
+from sumo_rl.environment.attack_controller import global_orchestrator
 from sumo_rl.environment.gan_attacker import load_generator_strict, GANLoadError
 
-def evaluate_gan_vs_defender():
+
+NET_FILE = "sumo_rl/nets/4x4-Lucas/4x4.net.xml"
+ROUTE_FILE = "sumo_rl/nets/4x4-Lucas/4x4c1c2c1c2.rou.xml"
+RECURRENT_PATH = "outputs/recurrent_urban_shield_4x4"
+
+
+def evaluate_gan_vs_defender(num_seconds=4000, use_gui=True):
     print("======================================================")
-    print("ÉVALUATION : DÉFENSEUR MARL vs ATTAQUANT GAN (LSTM)")
+    print("EVALUATION : DEFENSEUR MARL (16 feux) vs ATTAQUANT SURROGATE (LSTM)")
     print("======================================================\n")
 
-    # 1. Init Environnement 4x4 avec GUI
-    print("[*] Initialisation de la Grille Urbaine (4x4)...")
-    env = sumo_rl.SumoEnvironment(
-        net_file='sumo_rl/nets/4x4-Lucas/4x4.net.xml',
-        route_file='sumo_rl/nets/4x4-Lucas/4x4c1c2c1c2.rou.xml',
-        use_gui=True,
-        num_seconds=4000, 
+    # 1. Environnement MARL parallele (16 agents simultanes)
+    print("[*] Initialisation de la grille urbaine 4x4 (MARL, 16 agents)...")
+    par_env = sumo_rl.parallel_env(
+        net_file=NET_FILE,
+        route_file=ROUTE_FILE,
+        use_gui=use_gui,
+        num_seconds=num_seconds,
         delta_time=5,
-        single_agent=True, # Utilisation du modèle partagé sur l'espace d'action global
         observation_class=VANETObservationFunction,
-        reward_fn='vanet',
-        collision_action='warn'  # Collisions réellement mesurées
+        reward_fn="vanet",
+        collision_action="warn",
+        time_to_teleport=300,
     )
 
-    # 2. Chargement du Défenseur (RecurrentPPO en priorité, repli MLP explicite)
-    print("[*] Chargement du Défenseur Temporel (RecurrentPPO)...")
-    recurrent_path = "outputs/recurrent_urban_shield_4x4"
-    mlp_path = "outputs/ppo_marl_4x4_model"
-    if os.path.exists(recurrent_path + ".zip"):
-        defender = RecurrentPPO.load(recurrent_path)
-        print(f"[*] Défenseur récurrent chargé: {recurrent_path}.zip")
-    elif os.path.exists(mlp_path + ".zip"):
-        from stable_baselines3 import PPO
-        defender = PPO.load(mlp_path)
-        print(f"[*] Repli sur le défenseur MLP: {mlp_path}.zip")
-    else:
-        print("[!] Échec critique: aucun modèle de défense trouvé (ni récurrent ni MLP).")
-        env.close()
+    # 2. Defenseur RecurrentPPO partage
+    print("[*] Chargement du defenseur MARL recurrent (cerveau partage)...")
+    if not os.path.exists(RECURRENT_PATH + ".zip"):
+        print(f"[!] Modele de defense introuvable: {RECURRENT_PATH}.zip")
+        print("[!] Entrainez d'abord le defenseur: python train_marl_defender.py")
+        par_env.close()
         return
+    defender = RecurrentPPO.load(RECURRENT_PATH)
 
-    # 3. Chargement de l'Attaquant LSTM-GAN (STRICT: pas de duel sur poids aléatoires)
-    print("[*] Chargement du Hacker Temporel (LSTM-GAN)...")
-    state_dim = env.observation_space.shape[0]
+    # 3. Attaquant surrogate (chargement STRICT)
+    print("[*] Chargement de l'attaquant surrogate (LSTM)...")
+    sample_agent = par_env.possible_agents[0]
+    state_dim = par_env.observation_space(sample_agent).shape[0]
     try:
-        gan_hacker = load_generator_strict(state_dim)
+        attacker = load_generator_strict(state_dim)
     except GANLoadError as exc:
-        print(f"[!] Échec critique du chargement du GAN: {exc}")
-        print("[!] Duel annulé: refus de combattre un attaquant non entraîné (poids aléatoires).")
-        env.close()
+        print(f"[!] Echec critique du chargement de l'attaquant: {exc}")
+        print("[!] Duel annule: refus de combattre un attaquant non entraine.")
+        par_env.close()
         return
 
-    obs, info = env.reset()
-    done = False
-    step = 0
-    
-    # Mémoire du GAN (états cachés LSTM)
-    gan_hidden = None
+    observations, infos = par_env.reset()
+    # Etats LSTM du defenseur, un par agent (parameter sharing).
+    lstm_states = {agent: None for agent in par_env.possible_agents}
+    episode_starts = {agent: True for agent in par_env.possible_agents}
+    attacker_hidden = None
 
-    print("\n🚀 DÉBUT DE LA SUPERVISION URBAINE...")
-    while not done:
-        # --- TOUR DU GAN (ATTAQUE SÉQUENTIELLE) ---
-        with torch.no_grad():
-            state_tensor = torch.FloatTensor(obs).unsqueeze(0).unsqueeze(0) # (Batch=1, Seq=1, Dim)
-            attack_vector_tensor, gan_hidden = gan_hacker(state_tensor, gan_hidden)
-            attack_vector = attack_vector_tensor.numpy()[0]
-            
-        # Ciblage d'une intersection aléatoire ou critique pour la démo
-        target_ts = env.ts_ids[step % len(env.ts_ids)]
-        global_orchestrator.bridge_cGAN_tensor(target_ts, attack_vector)
-        
-        # --- TOUR DU PPO (DÉFENSE AVEC MÉMOIRE) ---
-        # RecurrentPPO gère son propre état interne si on ne lui passe pas
-        action, _ = defender.predict(obs, deterministic=True)
-        obs, reward, terminated, truncated, info = env.step(action)
-        
-        # Affichage du statut toutes les 10 étapes
+    print("\nDEBUT DE LA SUPERVISION URBAINE...")
+    step = 0
+    while par_env.agents:
+        # --- TOUR DE L'ATTAQUANT (sequence adaptative) ---
+        target_ts = par_env.agents[step % len(par_env.agents)]
+        if target_ts in observations:
+            with torch.no_grad():
+                obs_t = torch.FloatTensor(observations[target_ts]).unsqueeze(0)
+                attack_vec_t, attacker_hidden = attacker(obs_t, attacker_hidden)
+                attack_vec = attack_vec_t.numpy()[0]
+            global_orchestrator.bridge_cGAN_tensor(target_ts, attack_vec)
+
+        # --- TOUR DU DEFENSEUR (decision par agent, cerveau partage) ---
+        actions = {}
+        for agent, obs in observations.items():
+            action, lstm_states[agent] = defender.predict(
+                obs,
+                state=lstm_states[agent],
+                episode_start=np.array([episode_starts[agent]]),
+                deterministic=True,
+            )
+            episode_starts[agent] = False
+            actions[agent] = int(action)
+
+        observations, rewards, terminations, truncations, infos = par_env.step(actions)
+
         if step % 10 == 0:
-            attack_info = "🟢 SAIN"
+            attack_info = "SAIN"
             if target_ts in global_orchestrator.active_attacks:
                 atk = global_orchestrator.active_attacks[target_ts]
-                attack_info = f"🔴 {atk['type'].name} sur {target_ts}"
-            
-            print(f"Step {step:03d} | État Ville : {attack_info} | Récompense : {reward:+.2f}")
+                attack_info = f"ATTAQUE {atk['type'].name} sur {target_ts}"
+            mean_r = float(np.mean(list(rewards.values()))) if rewards else 0.0
+            print(f"Step {step:03d} | Etat ville : {attack_info} | Reward moy : {mean_r:+.2f}")
 
-        done = terminated or truncated
         step += 1
-        time.sleep(0.05)
+        if use_gui:
+            time.sleep(0.02)
 
-    env.close()
-    print("\n[🏁] Mission terminée.")
+    par_env.close()
+    print("\n[FIN] Mission terminee.")
+
 
 if __name__ == "__main__":
     evaluate_gan_vs_defender()

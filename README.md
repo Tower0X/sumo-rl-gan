@@ -11,7 +11,7 @@ Ce projet implémente une plateforme de **Co-Simulation (Trafic-Réseau)** pour 
 > **Note méthodologique.** La sécurité routière n'est pas postulée : les collisions sont **réellement mesurées** via SUMO (`--collision.action`) et la TraCI API, et pénalisées explicitement dans la récompense.
 
 ### Architecture Triple-Module
-1.  **Module Défense (MARL-PPO) :** Un agent d'Apprentissage par Renforcement entraîné avec une fonction de récompense **Fail-Safe à deux phases** (Eq. 3.4 / 3.5). La récompense commute sur l'état de communication `comm_ok` : en mode normal elle minimise pression + file ; en mode dégradé (perte V2X) elle ajoute un terme **quadratique** `−κ_quad·S²` sur la sur-file dangereuse `S = max(0, file − Q_safe)`. Les collisions et freinages d'urgence sont pénalisés dans les deux phases.
+1.  **Module Défense (MARL récurrent) :** Les **16 feux** de la grille 4x4 sont des agents simultanés (API PettingZoo `parallel_env`) contrôlés par un **cerveau LSTM unique partagé** (RecurrentPPO + parameter sharing via SuperSuit). Un seul réseau apprend des expériences de tous les carrefours : apprentissage 16x plus dense, résilience distribuée. Il est entraîné avec une fonction de récompense **Fail-Safe à deux phases** (Eq. 3.4 / 3.5). La récompense commute sur l'état de communication `comm_ok` : en mode normal elle minimise pression + file ; en mode dégradé (perte V2X) elle ajoute un terme **quadratique** `−κ_quad·S²` sur la sur-file dangereuse `S = max(0, file − Q_safe)`. Les collisions et freinages d'urgence sont pénalisés dans les deux phases.
 2.  **Module Attaque (Orchestrateur) :** Un middleware qui intercepte le vecteur d'observation et injecte **8 familles d'attaques** (`AttackType`) en ciblant exactement les bonnes features, sans jamais violer l'espace d'observation `Box[0,1]` :
     *   `TEMPORAL_DOS`, `FLOODING_DDOS`, `SLOWLORIS_DDOS` — perturbation de la latence V2X.
     *   `DATA_POISONING` — dissimulation des files d'attente (capteurs).
@@ -49,24 +49,23 @@ pip install -e .
 
 Les phases s'enchaînent : on entraîne un défenseur, puis l'attaquant GAN contre ce défenseur, puis on évalue le duel.
 
-### Phase 1 : Défenseur mono-intersection (mise au point rapide)
+### Phase 1 : Défenseur MARL coopératif (grille 4x4, 16 feux)
 ```bash
-python train_vanet_ppo.py        # PPO sur 2way-single-intersection -> outputs/ppo_vanet_model
+python train_marl_defender.py --timesteps 200000
+# RecurrentPPO (LSTM) + SuperSuit parameter sharing
+# -> outputs/recurrent_urban_shield_4x4.zip
 ```
 
-### Phase 2 : Défenseur coopératif sur la grille 4x4 (MARL, 16 feux)
+### Phase 2 : Résilience APPRISE par curriculum adversarial (recommandé)
 ```bash
-python train_marl_cooperative.py # RecurrentPPO + SuperSuit (parameter sharing)
-                                 # -> outputs/recurrent_urban_shield_4x4
+python train_marl_adversarial_curriculum.py \
+    --phase1 60000 --phase2 100000 --phase3 120000
+# Phase 1 (jitter) -> Phase 2 (attaques manuelles) -> Phase 3 (attaquant surrogate)
+# -> outputs/recurrent_urban_shield_4x4.zip (défenseur durci)
 ```
-> `train_marl_grid.py` est une variante d'entraînement récurrent conservée pour comparaison.
+> La résilience est **apprise** : le défenseur voit les attaques pendant l'entraînement (pas de zéro-shot).
 
-### Phase 3 : Entraînement adversarial du GAN
-```bash
-python train_gan_adversarial.py  # GAN attaquant vs défenseur gelé -> outputs/gan/
-```
-
-### Phase 4 : Évaluation GAN vs Défenseur (interface SUMO)
+### Phase 3 : Évaluation du duel (interface SUMO, 16 agents)
 ```bash
 python evaluate_gan_vs_defender.py
 ```
