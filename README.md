@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![SUMO](https://img.shields.io/badge/SUMO-1.18+-green.svg)
 ![RL](https://img.shields.io/badge/Stable--Baselines3-PPO-orange.svg)
-![GAN](https://img.shields.io/badge/Adversarial-cGAN-red.svg)
+![Adversarial](https://img.shields.io/badge/Adversarial-Surrogate--Attacker-red.svg)
 
 ## 📌 Présentation du Projet
 Ce projet implémente une plateforme de **Co-Simulation (Trafic-Réseau)** pour l'audit de résilience des infrastructures VANET (Vehicular Ad-hoc Networks). L'objectif est de concevoir un contrôleur de trafic par apprentissage par renforcement qui **mesure et minimise** les collisions et les freinages d'urgence, y compris lorsque les communications V2X sont dégradées par des cyber-attaques.
@@ -17,7 +17,7 @@ Ce projet implémente une plateforme de **Co-Simulation (Trafic-Réseau)** pour 
     *   `DATA_POISONING` — dissimulation des files d'attente (capteurs).
     *   `GHOST_VEHICLES`, `POSITION_JITTER` — attaques Sybil sur la densité.
     *   `JAMMER` — coupure totale de la communication (`comm_ok = 0`).
-3.  **Module Adversarial (GAN LSTM) :** Un générateur récurrent qui produit des séquences d'attaques conditionnées par l'état du trafic. Le chargement du modèle est **strict** : aucun duel n'est lancé avec des poids non entraînés.
+3.  **Module Adversarial (Attaquant par Jumeau Numérique, LSTM) :** Un attaquant récurrent (`SurrogateAdversarialAttacker`) produit des séquences d'attaques conditionnées par l'état du trafic. Il est entraîné contre un **jumeau numérique** (`SurrogateRewardModel`) qui imite la réponse du couple SUMO+PPO en prédisant la récompense sous attaque ; l'attaquant minimise cette récompense prédite par descente de gradient (Model-based Adversarial Attack). **Terminologie honnête :** ce n'est pas un GAN au sens strict (pas de jeu minimax réel/généré), et c'est nommé comme tel dans le code. Le chargement du modèle est **strict** : aucun duel n'est lancé avec des poids non entraînés.
 
 ---
 
