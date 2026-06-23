@@ -30,7 +30,7 @@ Ce projet implémente une plateforme de **Co-Simulation (Trafic-Réseau)** pour 
 ### 2. Installation de l'environnement Python
 ```bash
 # Clonez le dépôt
-git clone <repository_url>
+git clone https://github.com/Tower0X/sumo-rl-gan.git
 cd sumo-rl-gan
 
 # Créez un environnement virtuel
