@@ -22,21 +22,27 @@ from sb3_contrib import RecurrentPPO
 from shared_state import state
 
 
-NET_FILE = "sumo_rl/nets/4x4-Lucas/4x4.net.xml"
-ROUTE_FILE = "sumo_rl/nets/4x4-Lucas/4x4c1c2c1c2.rou.xml"
-RECURRENT_PATH = "outputs/recurrent_urban_shield_4x4"
-
-
 def run_simulation():
     state.reset()
     state.running = True
-    state.add_log("Demarrage du bouclier urbain MARL (16 agents)...", "info")
+    state.add_log("Demarrage du bouclier urbain MARL...", "info")
 
-    # 1. Environnement MARL parallele (16 feux simultanes)
+    # Sélection de la ville
+    if state.city_map == "Ville A (Grille 2x2)":
+        net_file = "sumo_rl/nets/2x2/2x2.net.xml"
+        route_file = "sumo_rl/nets/2x2/2x2.rou.xml"
+    elif state.city_map == "Ville B (Grille 3x2)":
+        net_file = "sumo_rl/nets/3x2/3x2.net.xml"
+        route_file = "sumo_rl/nets/3x2/3x2.rou.xml"
+    else:
+        net_file = "sumo_rl/nets/4x4-Lucas/4x4.net.xml"
+        route_file = "sumo_rl/nets/4x4-Lucas/4x4c1c2c1c2.rou.xml"
+
+    # 1. Environnement MARL parallele
     try:
         par_env = sumo_rl.parallel_env(
-            net_file=NET_FILE,
-            route_file=ROUTE_FILE,
+            net_file=net_file,
+            route_file=route_file,
             use_gui=state.use_gui,
             num_seconds=20000,
             delta_time=5,
@@ -59,7 +65,7 @@ def run_simulation():
     # 2. Defenseur MARL recurrent (cerveau partage)
     state.add_log("Chargement de la matrice neurale recurrente (LSTM partagee)...", "info")
     try:
-        defender = RecurrentPPO.load(RECURRENT_PATH)
+        defender = RecurrentPPO.load("outputs/recurrent_urban_shield_4x4")
     except Exception:
         state.add_log("Modele MARL recurrent introuvable. Entrainez train_marl_defender.py.", "error")
         par_env.close()
@@ -108,11 +114,19 @@ def run_simulation():
 
         elif current_mode == "manual_attack":
             if manual_atk != AttackType.NONE and target_ts:
+                # Durée généreuse + ré-armement chaque step: l'attaque survit
+                # continuellement tant que l'utilisateur la maintient active.
                 global_orchestrator.trigger_manual_attack(
-                    target_ts, manual_atk, manual_virulence, duration_steps=1
+                    target_ts, manual_atk, manual_virulence, duration_steps=20
                 )
                 active_name = f"{manual_atk.name} sur {target_ts}"
                 active_intensity = manual_virulence
+                # Log visible au dashboard (pas à chaque step pour éviter le spam)
+                if state.step % 5 == 0:
+                    state.add_log(
+                        f"ATTAQUE {manual_atk.name} (force {manual_virulence*100:.0f}%) "
+                        f"sur {target_ts}", "warning"
+                    )
 
         elif current_mode == "adversarial_gan":
             if not gan_loaded:
@@ -142,15 +156,44 @@ def run_simulation():
 
         observations, rewards, terminations, truncations, infos = par_env.step(actions)
 
+        # --- CANAL PHYSIQUE: effet TraCI VISIBLE sur TOUTES les intersections attaquées ---
+        # Après le step, SUMO est avancé: on injecte les véhicules fantômes
+        # rouges / on gèle la phase pour rendre l'attaque physiquement réelle.
+        physical_effects = {"ghosts_spawned": 0, "phase_frozen": False}
+        if sumo_env is not None and current_mode in ("manual_attack", "adversarial_gan"):
+            for atk_ts_id in list(global_orchestrator.active_attacks.keys()):
+                if atk_ts_id in sumo_env.traffic_signals:
+                    fx = global_orchestrator.apply_physical_attack(
+                        sumo_env.traffic_signals[atk_ts_id], sumo_env.sumo
+                    )
+                    physical_effects["ghosts_spawned"] += fx.get("ghosts_spawned", 0)
+                    physical_effects["phase_frozen"] = physical_effects["phase_frozen"] or fx.get("phase_frozen", False)
+
         # --- AGREGATION DES METRIQUES SUR LES 16 AGENTS ---
+        # Track comm_ok de la cible pour le dashboard
+        target_comm_ok = True
+        if sumo_env is not None and target_ts in sumo_env.traffic_signals:
+            target_comm_ok = getattr(sumo_env.traffic_signals[target_ts], "comm_ok", True)
+
         with state.lock:
             state.step += 1
             state.active_attack_name = active_name
             state.active_attack_intensity = active_intensity
+            state.total_ghosts_spawned += physical_effects.get("ghosts_spawned", 0)
+            state.phase_frozen = physical_effects.get("phase_frozen", False)
+            state.target_comm_ok = target_comm_ok
+
+            # Nombre d'intersections actuellement sous attaque
+            state.n_intersections_attacked = len(global_orchestrator.active_attacks)
 
             mean_reward = float(np.mean(list(rewards.values()))) if rewards else 0.0
             state.current_reward = mean_reward
             state.reward_history.append(mean_reward)
+
+            # Reward de la cible seule (pour voir l'impact direct)
+            if target_ts in rewards:
+                state.target_reward = float(rewards[target_ts])
+            state.target_reward_history.append(state.target_reward)
 
             # Temps d'attente systeme (depuis info systeme commun a tous les agents)
             sys_wait = 0.0
@@ -164,13 +207,14 @@ def run_simulation():
             total_queues = 0
             n = 0
             for agent, obs in observations.items():
-                ts = sumo_env.traffic_signals.get(agent) if sumo_env is not None else None
-                if ts is None:
+                ts_obj = sumo_env.traffic_signals.get(agent) if sumo_env is not None else None
+                if ts_obj is None:
                     continue
-                layout = compute_obs_layout(ts)
+                layout = compute_obs_layout(ts_obj)
                 oq = layout["offset_queue"]
                 n_lanes = layout["n_lanes"]
-                total_latency += float(np.abs(obs[layout["latency_idx"]]) * 10)
+                # Latence normalisée [0,1] -> affichée en ms (×100)
+                total_latency += float(np.abs(obs[layout["latency_idx"]]) * 100)
                 total_queues += int(np.sum(obs[oq:oq + n_lanes]) * 10)
                 n += 1
             state.latency_history.append(total_latency / n if n else 0.0)

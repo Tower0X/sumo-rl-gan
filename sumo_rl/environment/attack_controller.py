@@ -20,6 +20,25 @@ class TargetType(Enum):
     RADIUS = "Radius"
 
 
+# Familles d'attaques exposées à l'UI (segmentation Lot E). Source de vérité
+# unique partagée par le dashboard et l'orchestrateur pour éviter toute
+# divergence label UI <-> Enum.
+ATTACK_FAMILY_LABELS = {
+    AttackType.NONE: "Aucune",
+    AttackType.JAMMER: "Brouilleur (Coupure Totale)",
+    AttackType.FLOODING_DDOS: "DoS - Flooding (Saturation)",
+    AttackType.SLOWLORIS_DDOS: "DoS - Slowloris (Lag Persistant)",
+    AttackType.GHOST_VEHICLES: "Sybil - Ghost Vehicles (Densité)",
+    AttackType.POSITION_JITTER: "Sybil - Position Jitter (Cinématique)",
+    AttackType.TEMPORAL_DOS: "Temporal DoS (Latence Variable)",
+    AttackType.DATA_POISONING: "Data Poisoning (Capteurs)",
+}
+
+# Couleur RGBA des véhicules fantômes injectés (ROUGE vif, visibles en GUI).
+GHOST_VEHICLE_COLOR = (255, 0, 0, 255)
+GHOST_VEHICLE_TYPE_ID = "vanet_ghost_attacker"
+
+
 def compute_obs_layout(ts):
     """Compute the EXACT feature boundaries of a VANET observation vector.
 
@@ -55,10 +74,21 @@ class CyberPhysicalAttackOrchestrator:
     Le Cœur de l'Arsenal. Ce contrôleur intercepte les flux de données entre
     SUMO (la physique) et l'Agent PPO (l'IA), permettant d'injecter des
     failles de sécurité sophistiquées. Pilotable à la main ou par un GAN.
+
+    Deux canaux d'attaque COMPLÉMENTAIRES (Lot E):
+      1. PERCEPTUEL (``corrupt_observation``) : empoisonne le vecteur
+         d'observation lu par le PPO (densité, files, latence, comm).
+      2. PHYSIQUE (``apply_physical_attack``) : agit directement sur SUMO via
+         TraCI (véhicules fantômes ROUGES, gel/forçage de phase), garantissant
+         un effet VISIBLE et MESURABLE même face à un PPO durci par curriculum.
     """
     def __init__(self, log_path="outputs/attack_log.csv"):
-        self.active_attacks = {}  # Stocke les attaques en cours {target_id: attack_config}
+        self.active_attacks = {}  # {target_id: attack_config}
         self.log_path = log_path
+        # Compteur global pour nommer de manière unique les véhicules fantômes.
+        self._ghost_counter = 0
+        # Mémorise les types de véhicule déjà créés par connexion SUMO.
+        self._ghost_type_ready = set()
         self._init_logger()
 
     def _init_logger(self):
@@ -83,14 +113,24 @@ class CyberPhysicalAttackOrchestrator:
         """
         Déclenche une attaque ciblée.
         intensity: Float entre 0.0 (Faible) et 1.0 (Destruction Totale)
+        duration_steps: durée de vie de l'attaque en LECTURES d'observation
+            (canal perceptuel). Le canal physique vit tant que l'attaque est
+            ré-armée par le runner.
         """
+        existing = self.active_attacks.get(target_id)
+        # Re-arming d'une attaque identique déjà active: on prolonge sans spammer le log.
+        if existing and existing["type"] == attack_type:
+            existing["intensity"] = float(np.clip(intensity, 0.0, 1.0))
+            existing["remaining_steps"] = max(existing["remaining_steps"], duration_steps)
+            existing["target_type"] = target_type
+            return
         self.active_attacks[target_id] = {
             "type": attack_type,
             "intensity": float(np.clip(intensity, 0.0, 1.0)),
             "remaining_steps": duration_steps,
-            "target_type": target_type
+            "target_type": target_type,
         }
-        print(f"\n[⚠️ ALERTE CYBER] Attaque {attack_type.name} (Force: {intensity*100:.0f}%) lancée sur {target_type.value} {target_id} !")
+        print(f"\n[!] ALERTE CYBER: Attaque {attack_type.name} (Force: {intensity*100:.0f}%) lancee sur {target_type.value} {target_id} !")
 
     # ==========================================
     # MOTEUR DE GÉNÉRATION : cGAN INPUT BRIDGE
@@ -136,7 +176,7 @@ class CyberPhysicalAttackOrchestrator:
         if attack["remaining_steps"] <= 0:
             del self.active_attacks[ts_id]
             ts.comm_ok = True
-            print(f"[✅ RECOVERY] Fin de l'attaque sur {ts_id}. Réseau restauré.")
+            print(f"[OK] RECOVERY: Fin de l'attaque sur {ts_id}. Reseau restaure.")
             return raw_obs
 
         # Décrémentation du timer
@@ -157,20 +197,27 @@ class CyberPhysicalAttackOrchestrator:
         queue_slice = slice(oq, oq + n_lanes)
 
         # -----------------------------------------------------
-        # 1. TEMPORAL DoS / FLOODING / SLOWLORIS -> perturbent la LATENCE uniquement
+        # 1. TEMPORAL DoS / FLOODING / SLOWLORIS -> perturbent la LATENCE ET comm_ok
         # -----------------------------------------------------
         if attack_type == AttackType.TEMPORAL_DOS:
-            corrupted_obs[lat] += np.random.normal(0, intensity * 0.5)
-            if intensity > 0.9:
+            corrupted_obs[lat] += np.random.normal(0.3, intensity * 0.5)
+            # Coupe la communication proportionnellement à l'intensité
+            if intensity > 0.5 or np.random.random() < intensity * 0.7:
                 ts.comm_ok = False
 
         elif attack_type == AttackType.FLOODING_DDOS:
-            corrupted_obs[lat] += np.random.uniform(0, intensity)
-            if np.random.random() < intensity:
+            # Saturation massive de la latence
+            corrupted_obs[lat] = min(1.0, corrupted_obs[lat] + intensity * 0.8)
+            # Forte probabilité de couper la communication
+            if np.random.random() < intensity * 0.9:
                 ts.comm_ok = False
 
         elif attack_type == AttackType.SLOWLORIS_DDOS:
-            corrupted_obs[lat] += intensity
+            # Lag persistant et croissant
+            corrupted_obs[lat] = min(1.0, corrupted_obs[lat] + intensity * 0.6)
+            # Communication dégradée sous forte intensité
+            if intensity > 0.6:
+                ts.comm_ok = False
 
         # -----------------------------------------------------
         # 2. DATA POISONING -> cache les embouteillages: bloc QUEUE uniquement
@@ -182,7 +229,9 @@ class CyberPhysicalAttackOrchestrator:
         # 3. GHOST VEHICLES (Sybil densité) -> bloc DENSITY uniquement
         # -----------------------------------------------------
         elif attack_type == AttackType.GHOST_VEHICLES:
-            corrupted_obs[density_slice] = corrupted_obs[density_slice] + intensity
+            corrupted_obs[density_slice] = np.clip(
+                corrupted_obs[density_slice] + intensity * 0.8, 0.0, 1.0
+            )
 
         # POSITION JITTER -> bruit gaussien sur la DENSITY uniquement
         elif attack_type == AttackType.POSITION_JITTER:
@@ -209,6 +258,119 @@ class CyberPhysicalAttackOrchestrator:
         )
 
         return corrupted_obs
+
+    # ==========================================
+    # L'ARSENAL : CANAL PHYSIQUE (TraCI) -- Lot E
+    # ==========================================
+    def _ensure_ghost_vtype(self, sumo, conn_label):
+        """Crée (une seule fois par connexion) un type de véhicule ROUGE.
+
+        Le type fantôme copie le comportement d'une voiture standard mais est
+        peint en rouge vif pour être immédiatement identifiable dans SUMO-GUI.
+        """
+        if conn_label in self._ghost_type_ready:
+            return
+        try:
+            existing = set(sumo.vehicletype.getIDList())
+            if GHOST_VEHICLE_TYPE_ID not in existing:
+                # Copie d'un type existant pour hériter de paramètres valides.
+                base_type = "DEFAULT_VEHTYPE" if "DEFAULT_VEHTYPE" in existing else (
+                    next(iter(existing)) if existing else None
+                )
+                if base_type is not None:
+                    sumo.vehicletype.copy(base_type, GHOST_VEHICLE_TYPE_ID)
+                else:
+                    sumo.vehicletype.add(GHOST_VEHICLE_TYPE_ID)
+                sumo.vehicletype.setColor(GHOST_VEHICLE_TYPE_ID, GHOST_VEHICLE_COLOR)
+            self._ghost_type_ready.add(conn_label)
+        except Exception as exc:
+            print(f"[WARN] Impossible de créer le type fantôme: {exc}")
+
+    def _spawn_ghost_vehicles(self, ts, sumo, n_ghosts):
+        """Injecte ``n_ghosts`` véhicules ROUGES sur les voies entrantes du feu.
+
+        Ce sont de VRAIS véhicules SUMO: ils occupent l'espace, sont vus par les
+        capteurs (densité/queue réelles), et provoquent de vrais bouchons -> l'effet
+        Sybil devient physiquement observable, pas seulement perceptuel.
+        """
+        conn_label = getattr(sumo, "label", "default")
+        self._ensure_ghost_vtype(sumo, conn_label)
+        lanes = list(getattr(ts, "lanes", []))
+        if not lanes:
+            return 0
+        spawned = 0
+        for i in range(n_ghosts):
+            lane = lanes[i % len(lanes)]
+            try:
+                edge = lane.rsplit("_", 1)[0]
+                route_id = f"ghost_route_{edge}"
+                # Crée une route minimale (1 edge) si absente.
+                try:
+                    if route_id not in sumo.route.getIDList():
+                        sumo.route.add(route_id, [edge])
+                except Exception:
+                    sumo.route.add(route_id, [edge])
+                veh_id = f"GHOST_{ts.id}_{self._ghost_counter}"
+                self._ghost_counter += 1
+                sumo.vehicle.add(
+                    veh_id,
+                    route_id,
+                    typeID=GHOST_VEHICLE_TYPE_ID,
+                    departLane="free",
+                    departSpeed="0",
+                )
+                sumo.vehicle.setColor(veh_id, GHOST_VEHICLE_COLOR)
+                spawned += 1
+            except Exception:
+                # Voie pleine / insertion refusée: on ignore ce fantôme.
+                continue
+        return spawned
+
+    def apply_physical_attack(self, ts, sumo):
+        """Applique l'effet PHYSIQUE d'une attaque active via TraCI.
+
+        À appeler par le runner APRÈS le step (quand SUMO est avancé) et AVANT la
+        prochaine décision. Complète le canal perceptuel pour garantir un effet
+        visible/mesurable face à un PPO durci.
+
+        - GHOST_VEHICLES / POSITION_JITTER -> injecte des véhicules ROUGES réels.
+        - JAMMER / FLOODING_DDOS / SLOWLORIS_DDOS / TEMPORAL_DOS -> gèle la phase
+          courante (l'agent perd le contrôle physique du feu pendant l'attaque).
+        - DATA_POISONING -> purement perceptuel (aucune action physique).
+
+        Retourne un dict d'effets appliqués (pour la télémétrie dashboard).
+        """
+        effects = {"ghosts_spawned": 0, "phase_frozen": False}
+        if sumo is None or ts.id not in self.active_attacks:
+            return effects
+        attack = self.active_attacks[ts.id]
+        attack_type = attack["type"]
+        intensity = attack["intensity"]
+
+        if attack_type in (AttackType.GHOST_VEHICLES, AttackType.POSITION_JITTER):
+            # Nombre de fantômes proportionnel à l'intensité (1 à 6 par step).
+            n_ghosts = max(1, int(round(intensity * 6)))
+            effects["ghosts_spawned"] = self._spawn_ghost_vehicles(ts, sumo, n_ghosts)
+
+        elif attack_type in (
+            AttackType.JAMMER,
+            AttackType.FLOODING_DDOS,
+            AttackType.SLOWLORIS_DDOS,
+            AttackType.TEMPORAL_DOS,
+        ):
+            # Gel de la phase: on ré-impose l'état courant, neutralisant l'action
+            # de l'agent. Probabilité de gel proportionnelle à l'intensité pour
+            # les DoS partiels; gel certain pour le Jammer.
+            freeze = attack_type == AttackType.JAMMER or np.random.random() < intensity
+            if freeze:
+                try:
+                    current_state = sumo.trafficlight.getRedYellowGreenState(ts.id)
+                    sumo.trafficlight.setRedYellowGreenState(ts.id, current_state)
+                    effects["phase_frozen"] = True
+                except Exception:
+                    pass
+
+        return effects
 
 # Instance globale pour un accès partagé entre toutes les intersections
 global_orchestrator = CyberPhysicalAttackOrchestrator()

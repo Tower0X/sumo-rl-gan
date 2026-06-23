@@ -147,7 +147,7 @@ class SurrogateRewardModel(nn.Module):
 # =====================================================================
 
 # Chemin canonique de l'attaquant LSTM entraine (source de verite unique).
-DEFAULT_GENERATOR_PATH = "outputs/gan/generator_model.pth"
+DEFAULT_GENERATOR_PATH = "outputs/gan/generator_model_lstm.pth"
 
 
 class GANLoadError(RuntimeError):

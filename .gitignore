@@ -117,3 +117,5 @@ settings.json
 /wandb
 /memoire_latex/
 generate_report_plots.py
+/outputs/
+/archives/
